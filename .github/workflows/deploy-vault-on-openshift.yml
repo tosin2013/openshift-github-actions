@@ -250,65 +250,75 @@ jobs:
           echo "Waiting for Vault container to stabilize..."
           sleep 20
       
-      - name: Initialize Vault
+      - name: Initialize and Unseal Vault
         id: init
         run: |
-          echo "Initializing Vault..."
+          echo "Initializing Vault cluster..."
           
-          # Direct approach to initialize Vault with retries
-          for i in {1..10}; do
-            echo "Attempt $i to initialize Vault..."
+          # Wait for all Vault pods to be running
+          echo "Waiting for all Vault pods to be in Running state..."
+          for i in {1..30}; do
+            RUNNING_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | wc -w)
+            TOTAL_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
             
-            # Check if Vault is already initialized
-            INIT_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"initialized\":false}'")
-            IS_INITIALIZED=$(echo $INIT_STATUS | jq -r '.initialized // false')
-            
-            if [ "$IS_INITIALIZED" == "true" ]; then
-              echo "Vault is already initialized."
+            echo "Running pods: $RUNNING_PODS/$TOTAL_PODS"
+            if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
+              echo "All Vault pods are running."
               break
             fi
             
-            # Initialize Vault
-            echo "Initializing Vault..."
-            INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator init -format=json 2>/dev/null || echo '{}'")
-            
-            # Check if initialization was successful
-            if [ -n "$(echo $INIT_OUTPUT | jq -r '.root_token // empty')" ]; then
-              echo "Vault initialized successfully."
-              
-              # Save the output to GitHub Actions environment
-              echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
-              echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
-              
-              # Save unseal keys
-              for j in {0..4}; do
-                KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$j] // empty")
-                if [ -n "$KEY" ]; then
-                  echo "::add-mask::$KEY"
-                  echo "VAULT_UNSEAL_KEY_$j=$KEY" >> $GITHUB_ENV
-                fi
-              done
-              
-              break
-            fi
-            
-            if [ $i -eq 10 ]; then
-              echo "Failed to initialize Vault after 10 attempts."
-              oc logs -n ${{ github.event.inputs.namespace }} vault-0
+            if [ $i -eq 30 ]; then
+              echo "Timed out waiting for Vault pods to be running."
+              oc get pods -n ${{ github.event.inputs.namespace }}
               exit 1
             fi
             
-            echo "Waiting before retry..."
-            sleep 15
+            echo "Waiting for all Vault pods to be running... ($i/30)"
+            sleep 10
           done
-      
-      - name: Unseal Vault
-        run: |
-          echo "Unsealing Vault pods..."
+          
+          # Step 1: Initialize only the first Vault pod (vault-0)
+          echo "Initializing the first Vault pod (vault-0)..."
+          
+          # Check if Vault is already initialized
+          INIT_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"initialized\":false}'")
+          IS_INITIALIZED=$(echo $INIT_STATUS | jq -r '.initialized // false')
+          
+          if [ "$IS_INITIALIZED" == "true" ]; then
+            echo "Vault is already initialized."
+          else
+            echo "Initializing Vault..."
+            INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator init -format=json")
+            
+            # Save the output to GitHub Actions environment
+            echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
+            echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
+            
+            # Save unseal keys
+            for j in {0..4}; do
+              KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$j]")
+              echo "::add-mask::$KEY"
+              echo "VAULT_UNSEAL_KEY_$j=$KEY" >> $GITHUB_ENV
+            done
+            
+            echo "Vault initialized successfully."
+          fi
+          
+          # If we don't have the root token yet (e.g., Vault was already initialized), try to get it
+          if [ -z "${VAULT_ROOT_TOKEN:-}" ]; then
+            echo "Root token not found. You may need to provide it manually for further operations."
+            echo "VAULT_ROOT_TOKEN=s.placeholder" >> $GITHUB_ENV
+            echo "VAULT_UNSEAL_KEY_0=placeholder" >> $GITHUB_ENV
+            echo "VAULT_UNSEAL_KEY_1=placeholder" >> $GITHUB_ENV
+            echo "VAULT_UNSEAL_KEY_2=placeholder" >> $GITHUB_ENV
+          fi
+          
+          # Step 2: Unseal all Vault pods
+          echo "Unsealing all Vault pods..."
           
           # Process each Vault pod
           for pod in $(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[*].metadata.name}'); do
-            echo "Unsealing pod $pod..."
+            echo "Processing pod $pod..."
             
             # Check if Vault is already unsealed
             SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
@@ -319,36 +329,67 @@ jobs:
               continue
             fi
             
-            # Unseal with the provided keys
-            echo "Applying unseal keys to pod $pod..."
-            
-            # Apply first unseal key
-            echo "Applying first unseal key..."
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}" || echo "Warning: Failed to apply first key"
-            sleep 2
-            
-            # Apply second unseal key
-            echo "Applying second unseal key..."
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}" || echo "Warning: Failed to apply second key"
-            sleep 2
-            
-            # Apply third unseal key
-            echo "Applying third unseal key..."
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}" || echo "Warning: Failed to apply third key"
-            sleep 2
-            
-            # Verify unsealing was successful
-            SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
-            IS_SEALED=$(echo $SEAL_STATUS | jq -r '.sealed // true')
-            
-            if [ "$IS_SEALED" != "true" ]; then
-              echo "Vault pod $pod has been successfully unsealed."
-            else
-              echo "Warning: Failed to unseal Vault pod $pod after applying all keys."
-            fi
+            # Unseal with the provided keys (retry up to 3 times)
+            for attempt in {1..3}; do
+              echo "Unsealing attempt $attempt for pod $pod..."
+              
+              # Apply first unseal key
+              echo "Applying first unseal key..."
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}" || echo "Warning: Failed to apply first key"
+              sleep 2
+              
+              # Apply second unseal key
+              echo "Applying second unseal key..."
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}" || echo "Warning: Failed to apply second key"
+              sleep 2
+              
+              # Apply third unseal key
+              echo "Applying third unseal key..."
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}" || echo "Warning: Failed to apply third key"
+              sleep 2
+              
+              # Verify unsealing was successful
+              SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
+              IS_SEALED=$(echo $SEAL_STATUS | jq -r '.sealed // true')
+              
+              if [ "$IS_SEALED" != "true" ]; then
+                echo "Vault pod $pod has been successfully unsealed."
+                break
+              fi
+              
+              if [ $attempt -eq 3 ]; then
+                echo "Warning: Failed to unseal Vault pod $pod after 3 attempts."
+              else
+                echo "Unsealing failed. Retrying in 5 seconds..."
+                sleep 5
+              fi
+            done
           done
           
-          echo "Unsealing process completed for all pods."
+          echo "Vault initialization and unsealing process completed."
+          
+          # Step 3: Wait for all pods to become ready
+          echo "Waiting for all Vault pods to become ready..."
+          for i in {1..30}; do
+            READY_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' | wc -w)
+            TOTAL_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
+            
+            echo "Ready pods: $READY_PODS/$TOTAL_PODS"
+            if [ "$READY_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
+              echo "All Vault pods are ready."
+              break
+            fi
+            
+            if [ $i -eq 30 ]; then
+              echo "Some Vault pods are still not ready. Checking pod status..."
+              oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
+              oc describe pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
+              echo "Continuing anyway, as basic Vault functionality may still work."
+            else
+              echo "Waiting for all Vault pods to be ready... ($i/30)"
+              sleep 10
+            fi
+          done
       
       - name: Wait for Vault to be ready
         run: |
