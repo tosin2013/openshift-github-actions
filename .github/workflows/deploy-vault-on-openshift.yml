@@ -120,18 +120,20 @@ jobs:
               # Ensure service account has proper permissions for OpenShift
               serviceAccount:
                 create: true
-                annotations:
-                  serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"vault"}}'
           injector:
-            enabled: true
+            serviceAccount:
+              create: true
+              name: vault-injector
           EOF
-      
-      - name: Deploy Vault with Helm
-        run: |
-          helm install vault hashicorp/vault \
-            --version 0.30.0 \
+          
+          # Deploy Vault using Helm with the values file
+          helm upgrade --install vault hashicorp/vault \
             --namespace ${{ github.event.inputs.namespace }} \
-            -f vault-values.yaml
+            --version 0.30.0 \
+            --values vault-values.yaml
+          
+          echo "Vault deployment initiated. Waiting for pods to be created..."
+          sleep 30
       
       - name: Wait for Vault pods to start
         run: |
@@ -198,45 +200,40 @@ jobs:
         run: |
           echo "Initializing Vault..."
           
-          # Create a temporary initialization script
-          cat > init-vault.sh <<EOF
-          #!/bin/bash
-          set -e
-          
-          # Check if Vault is already initialized by looking at the file system
-          # This avoids connecting to the API which might not be ready
-          if [ -f /vault/data/.vault-initialized ]; then
-            echo "Vault is already initialized according to filesystem marker."
-            exit 0
-          fi
-          
-          # Try to initialize Vault
-          echo "Attempting to initialize Vault..."
-          INIT_OUTPUT=\$(vault operator init -format=json 2>/dev/null || echo '{}')
-          
-          # Check if initialization was successful by looking for root_token
-          if [ -n "\$(echo \$INIT_OUTPUT | jq -r '.root_token // empty')" ]; then
-            echo "\$INIT_OUTPUT" > /vault/data/init-output.json
-            touch /vault/data/.vault-initialized
-            echo "Vault initialized successfully."
-            exit 0
-          else
-            echo "Failed to initialize Vault or already initialized."
-            exit 1
-          fi
-          EOF
-          
-          # Make the script executable
-          chmod +x init-vault.sh
-          
-          # Copy the script to the pod
-          oc cp init-vault.sh ${{ github.event.inputs.namespace }}/vault-0:/tmp/init-vault.sh
-          
-          # Run the initialization script with retries
+          # Direct approach to initialize Vault with retries
           for i in {1..10}; do
             echo "Attempt $i to initialize Vault..."
-            if oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_ADDR='http://127.0.0.1:8200' && /tmp/init-vault.sh"; then
-              echo "Initialization script completed successfully."
+            
+            # Check if Vault is already initialized
+            INIT_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"initialized\":false}'")
+            IS_INITIALIZED=$(echo $INIT_STATUS | jq -r '.initialized // false')
+            
+            if [ "$IS_INITIALIZED" == "true" ]; then
+              echo "Vault is already initialized."
+              break
+            fi
+            
+            # Initialize Vault
+            echo "Initializing Vault..."
+            INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator init -format=json 2>/dev/null || echo '{}'")
+            
+            # Check if initialization was successful
+            if [ -n "$(echo $INIT_OUTPUT | jq -r '.root_token // empty')" ]; then
+              echo "Vault initialized successfully."
+              
+              # Save the output to GitHub Actions environment
+              echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
+              echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
+              
+              # Save unseal keys
+              for j in {0..4}; do
+                KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$j] // empty")
+                if [ -n "$KEY" ]; then
+                  echo "::add-mask::$KEY"
+                  echo "VAULT_UNSEAL_KEY_$j=$KEY" >> $GITHUB_ENV
+                fi
+              done
+              
               break
             fi
             
@@ -249,140 +246,50 @@ jobs:
             echo "Waiting before retry..."
             sleep 15
           done
-          
-          # Retrieve the initialization output
-          echo "Retrieving initialization data..."
-          INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- cat /vault/data/init-output.json 2>/dev/null || echo '{}')
-          
-          # Check if we got valid output
-          if [ -z "$(echo $INIT_OUTPUT | jq -r '.root_token // empty')" ]; then
-            echo "Failed to retrieve initialization data. Checking if Vault was already initialized..."
-            
-            # If Vault was already initialized, we need to generate new root token
-            echo "Attempting to generate a new root token..."
-            oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_ADDR='http://127.0.0.1:8200' && vault operator generate-root -init -format=json > /tmp/root-token-init.json"
-            ROOT_OTP=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "cat /tmp/root-token-init.json | jq -r '.otp'")
-            ROOT_NONCE=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "cat /tmp/root-token-init.json | jq -r '.nonce'")
-            
-            echo "Using emergency unseal keys from Vault documentation for demo purposes only."
-            echo "In production, you should securely store and retrieve your unseal keys."
-            
-            # For demo purposes only - in production, retrieve your actual unseal keys
-            DEMO_UNSEAL_KEYS=(
-              "1HfbYQGKR7GnLlj6Zn3vFE1XmG6IvA9OfBOWyF8aYCo=" 
-              "Og9pGx0AQBXq1nXe5xG+SDGVdvU/e+vIiEr4DYR3yFw=" 
-              "4J2H6Z/XLBQZkK5xcKjz0LXgCPGBCVHuGC1XCyRDMDk=" 
-            )
-            
-            # Generate root token using unseal keys
-            for KEY in "${DEMO_UNSEAL_KEYS[@]}"; do
-              ENCODED=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_ADDR='http://127.0.0.1:8200' && echo '$KEY' | vault operator generate-root -format=json -nonce='$ROOT_NONCE' -otp='$ROOT_OTP' -" | jq -r '.encoded_token')
-              if [ -n "$ENCODED" ] && [ "$ENCODED" != "null" ]; then
-                ROOT_TOKEN=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_ADDR='http://127.0.0.1:8200' && vault operator generate-root -format=json -nonce='$ROOT_NONCE' -otp='$ROOT_OTP' -decode='$ENCODED'" | jq -r '.token')
-                echo "Generated new root token."
-                break
-              fi
-            done
-            
-            # Create a simplified init output with just the root token
-            INIT_OUTPUT='{"root_token":"'$ROOT_TOKEN'"}'
-          fi
-          
-          # Save the output to GitHub Actions environment
-          echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
-          echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
-          
-          # Save unseal keys if available
-          for i in {0..4}; do
-            KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$i] // empty")
-            if [ -n "$KEY" ]; then
-              echo "::add-mask::$KEY"
-              echo "VAULT_UNSEAL_KEY_$i=$KEY" >> $GITHUB_ENV
-            fi
-          done
-          
-          echo "Vault initialization data retrieved successfully."
       
       - name: Unseal Vault
         run: |
-          echo "Creating unseal script..."
-          # Create a temporary unsealing script that handles connection issues
-          cat > unseal-vault.sh <<EOF
-          #!/bin/bash
-          set -e
-          
-          # Check if Vault is already unsealed by looking at the file system marker
-          if [ -f /vault/data/.vault-unsealed ]; then
-            echo "Vault is already unsealed according to filesystem marker."
-            exit 0
-          fi
-          
-          # Try to unseal Vault
-          echo "Attempting to unseal Vault..."
-          export VAULT_ADDR='http://127.0.0.1:8200'
-          
-          # Retry mechanism for unsealing
-          for attempt in {1..10}; do
-            echo "Unseal attempt \$attempt..."
-            
-            # Try to get seal status
-            SEAL_STATUS=\$(vault status -format=json 2>/dev/null || echo '{"sealed":true}')
-            IS_SEALED=\$(echo \$SEAL_STATUS | jq -r '.sealed')
-            
-            if [ "\$IS_SEALED" != "true" ]; then
-              echo "Vault is already unsealed."
-              touch /vault/data/.vault-unsealed
-              exit 0
-            fi
-            
-            # Unseal with the provided keys
-            echo "Applying unseal key 1..."
-            vault operator unseal "${VAULT_UNSEAL_KEY_0}" || echo "Failed to apply key 1, will retry"
-            sleep 2
-            
-            echo "Applying unseal key 2..."
-            vault operator unseal "${VAULT_UNSEAL_KEY_1}" || echo "Failed to apply key 2, will retry"
-            sleep 2
-            
-            echo "Applying unseal key 3..."
-            vault operator unseal "${VAULT_UNSEAL_KEY_2}" || echo "Failed to apply key 3, will retry"
-            sleep 2
-            
-            # Check if unsealing was successful
-            SEAL_STATUS=\$(vault status -format=json 2>/dev/null || echo '{"sealed":true}')
-            IS_SEALED=\$(echo \$SEAL_STATUS | jq -r '.sealed')
-            
-            if [ "\$IS_SEALED" != "true" ]; then
-              echo "Vault has been successfully unsealed."
-              touch /vault/data/.vault-unsealed
-              exit 0
-            fi
-            
-            echo "Vault is still sealed. Retrying in 5 seconds..."
-            sleep 5
-          done
-          
-          echo "Failed to unseal Vault after multiple attempts."
-          exit 1
-          EOF
-          
-          # Make the script executable
-          chmod +x unseal-vault.sh
+          echo "Unsealing Vault pods..."
           
           # Process each Vault pod
           for pod in $(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[*].metadata.name}'); do
-            echo "Processing pod $pod..."
+            echo "Unsealing pod $pod..."
             
-            # Copy the unsealing script to the pod
-            oc cp unseal-vault.sh ${{ github.event.inputs.namespace }}/$pod:/tmp/unseal-vault.sh
+            # Check if Vault is already unsealed
+            SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
+            IS_SEALED=$(echo $SEAL_STATUS | jq -r '.sealed // true')
             
-            # Run the unsealing script with environment variables
-            echo "Unsealing Vault pod $pod..."
-            if oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "export VAULT_UNSEAL_KEY_0='${{ env.VAULT_UNSEAL_KEY_0 }}' && export VAULT_UNSEAL_KEY_1='${{ env.VAULT_UNSEAL_KEY_1 }}' && export VAULT_UNSEAL_KEY_2='${{ env.VAULT_UNSEAL_KEY_2 }}' && /tmp/unseal-vault.sh"; then
-              echo "Unsealing script completed successfully for pod $pod."
+            if [ "$IS_SEALED" != "true" ]; then
+              echo "Vault pod $pod is already unsealed."
+              continue
+            fi
+            
+            # Unseal with the provided keys
+            echo "Applying unseal keys to pod $pod..."
+            
+            # Apply first unseal key
+            echo "Applying first unseal key..."
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}" || echo "Warning: Failed to apply first key"
+            sleep 2
+            
+            # Apply second unseal key
+            echo "Applying second unseal key..."
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}" || echo "Warning: Failed to apply second key"
+            sleep 2
+            
+            # Apply third unseal key
+            echo "Applying third unseal key..."
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}" || echo "Warning: Failed to apply third key"
+            sleep 2
+            
+            # Verify unsealing was successful
+            SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
+            IS_SEALED=$(echo $SEAL_STATUS | jq -r '.sealed // true')
+            
+            if [ "$IS_SEALED" != "true" ]; then
+              echo "Vault pod $pod has been successfully unsealed."
             else
-              echo "Warning: Unsealing script failed for pod $pod. Will continue with other pods."
-              # Don't exit with error as other pods might still work
+              echo "Warning: Failed to unseal Vault pod $pod after applying all keys."
             fi
           done
           
