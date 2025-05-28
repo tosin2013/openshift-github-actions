@@ -307,8 +307,7 @@ jobs:
       - name: Make Vault scripts executable
         run: |
           chmod +x ./scripts/common/wait_for_vault_pods.sh
-          chmod +x ./scripts/common/initialize_vault.sh
-          chmod +x ./scripts/common/unseal_vault.sh
+          chmod +x ./scripts/common/init_vault.sh
           chmod +x ./scripts/common/verify_vault_status.sh
       
       # Wait for Vault pods to be ready before proceeding with initialization
@@ -319,62 +318,46 @@ jobs:
           REPLICAS=${{ github.event.inputs.replicas }}
           ./scripts/common/wait_for_vault_pods.sh "$NAMESPACE" "$REPLICAS"
       
-      # Initialize Vault if auto-unseal is disabled
-      - name: Initialize Vault (if manual unseal)
+      # Initialize and unseal Vault if auto-unseal is disabled
+      - name: Initialize and Unseal Vault (if manual unseal)
         if: github.event.inputs.auto_unseal == 'false'
-        id: initialize_vault
+        id: initialize_unseal_vault
         run: |
           NAMESPACE=${{ github.event.inputs.namespace }}
-          OUTPUT=$(./scripts/common/initialize_vault.sh "$NAMESPACE")
           
-          # Parse the output to get the initialization directory
-          INIT_DIR=$(echo "$OUTPUT" | grep '^VAULT_INIT_DIR=' | cut -d'=' -f2-)
-          if [ -n "$INIT_DIR" ] && [ -d "$INIT_DIR" ]; then
-            # Set outputs for subsequent steps
-            echo "vault_init_dir=$INIT_DIR" >> $GITHUB_OUTPUT
-            
-            # Read and set root token and unseal keys as outputs
-            if [ -f "$INIT_DIR/root-token.txt" ]; then
-              ROOT_TOKEN=$(cat "$INIT_DIR/root-token.txt")
-              echo "::add-mask::$ROOT_TOKEN"
-              echo "root_token=$ROOT_TOKEN" >> $GITHUB_OUTPUT
-              echo "VAULT_ROOT_TOKEN=$ROOT_TOKEN" >> $GITHUB_ENV
-            fi
-            
-            # Set unseal keys as outputs
-            for i in {0..4}; do
-              if [ -f "$INIT_DIR/unseal-key-$i.txt" ]; then
-                KEY=$(cat "$INIT_DIR/unseal-key-$i.txt")
-                echo "::add-mask::$KEY"
-                echo "unseal_key_$i=$KEY" >> $GITHUB_OUTPUT
-                echo "VAULT_UNSEAL_KEY_$i=$KEY" >> $GITHUB_ENV
-              fi
-            done
-          fi
-      
-      # Unseal Vault if auto-unseal is disabled
-      - name: Unseal Vault (if manual unseal)
-        if: github.event.inputs.auto_unseal == 'false' && steps.initialize_vault.conclusion == 'success'
-        id: unseal_vault
-        env:
-          VAULT_UNSEAL_KEY_0: ${{ steps.initialize_vault.outputs.unseal_key_0 || secrets.VAULT_UNSEAL_KEY_0 }}
-          VAULT_UNSEAL_KEY_1: ${{ steps.initialize_vault.outputs.unseal_key_1 || secrets.VAULT_UNSEAL_KEY_1 }}
-          VAULT_UNSEAL_KEY_2: ${{ steps.initialize_vault.outputs.unseal_key_2 || secrets.VAULT_UNSEAL_KEY_2 }}
-        run: |
-          if [ -z "$VAULT_UNSEAL_KEY_0" ] || [ -z "$VAULT_UNSEAL_KEY_1" ] || [ -z "$VAULT_UNSEAL_KEY_2" ]; then
-            echo "::warning::Not all unseal keys are available. Manual unseal may be required."
-            exit 0
-          fi
+          # Run the combined initialization and unseal script
+          ./scripts/common/init_vault.sh "$NAMESPACE" \
+            ${{ secrets.VAULT_UNSEAL_KEY_0 || '' }} \
+            ${{ secrets.VAULT_UNSEAL_KEY_1 || '' }} \
+            ${{ secrets.VAULT_UNSEAL_KEY_2 || '' }} \
+            ${{ secrets.VAULT_UNSEAL_KEY_3 || '' }} \
+            ${{ secrets.VAULT_UNSEAL_KEY_4 || '' }}
           
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          ./scripts/common/unseal_vault.sh "$NAMESPACE" "$VAULT_UNSEAL_KEY_0" "$VAULT_UNSEAL_KEY_1" "$VAULT_UNSEAL_KEY_2"
+          # Capture the root token from the script output
+          ROOT_TOKEN=$(grep '^root_token=' $GITHUB_OUTPUT | cut -d'=' -f2-)
+          if [ -n "$ROOT_TOKEN" ]; then
+            echo "::add-mask::$ROOT_TOKEN"
+            echo "VAULT_ROOT_TOKEN=$ROOT_TOKEN" >> $GITHUB_ENV
+          fi
       
       # Verify Vault status after initialization/unsealing
       - name: Verify Vault status
         id: verify_vault_status
         run: |
           NAMESPACE=${{ github.event.inputs.namespace }}
-          ./scripts/common/verify_vault_status.sh "$NAMESPACE" 60  # 60 second timeout
+          # Use a longer timeout to ensure Vault has enough time to stabilize
+          TIMEOUT=120
+          echo "Verifying Vault status with a timeout of $TIMEOUT seconds..."
+          
+          # Check if any Vault pods are unsealed
+          if oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status" 2>/dev/null | grep -q 'Sealed.*false'; then
+            echo "✅ Vault is unsealed and operational"
+            exit 0
+          else
+            echo "❌ Vault is still sealed or not responding"
+            oc get pods -n "$NAMESPACE" -l app.kubernetes.io/name=vault -o wide
+            exit 1
+          fi
         continue-on-error: true  # Continue even if verification fails to allow for debugging
       
       # Output final status
@@ -382,16 +365,26 @@ jobs:
         if: always() && steps.verify_vault_status.conclusion == 'success'
         run: |
           echo "✅ Vault deployment and initialization completed successfully."
-          echo "Root Token: ${{ steps.initialize_vault.outputs.root_token || 'Not available' }}"
-          echo "Initialization Directory: ${{ steps.initialize_vault.outputs.vault_init_dir || 'Not available' }}"
+          echo "Root Token: ${{ env.VAULT_ROOT_TOKEN || 'Not available' }}"
+          
+          # Get the Vault UI URL if enabled
+          if [ "${{ github.event.inputs.ui_enabled }}" = "true" ]; then
+            VAULT_ROUTE=$(oc get route vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || echo "Not available")
+            echo "Vault UI: https://$VAULT_ROUTE"
+          fi
       
       - name: Output Vault status (failure case)
         if: always() && steps.verify_vault_status.conclusion != 'success'
         run: |
           echo "::error::Vault verification failed. Check the logs above for details."
-          echo "Root Token: ${{ steps.initialize_vault.outputs.root_token || 'Not available' }}"
-          echo "Initialization Directory: ${{ steps.initialize_vault.outputs.vault_init_dir || 'Not available' }}"
+          echo "Root Token: ${{ env.VAULT_ROOT_TOKEN || 'Not available' }}"
+          echo "\nCurrent Vault pods status:"
           oc get pods -n ${{ github.event.inputs.namespace }} -l app.kubernetes.io/name=vault -o wide
+          
+          # Show logs from the primary Vault pod for debugging
+          echo "\n=== Vault logs (vault-0) ==="
+          oc logs -n ${{ github.event.inputs.namespace }} vault-0 --tail=50 || true
+          
           exit 1
       
       - name: Configure Vault for OpenShift Authentication
