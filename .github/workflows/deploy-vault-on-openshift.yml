@@ -3,10 +3,6 @@ name: Deploy HashiCorp Vault on OpenShift
 on:
   workflow_dispatch:
     inputs:
-      cluster_context:
-        description: 'OpenShift cluster context from kubeconfig'
-        required: true
-        type: string
       namespace:
         description: 'Namespace to deploy Vault in'
         required: true
@@ -32,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up OpenShift CLI
         uses: redhat-actions/oc-installer@v1
