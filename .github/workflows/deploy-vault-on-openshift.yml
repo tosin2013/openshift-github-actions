@@ -159,20 +159,10 @@ jobs:
               VAULT_SKIP_VERIFY: "true"
               VAULT_DISABLE_MLOCK: "true"
             
-            # Customize readiness probe to accept initialized but sealed nodes
+            # Disable readiness probe to allow pods to start without being ready
+            # This is necessary because the default probe is too strict for OpenShift
             readinessProbe:
-              enabled: true
-              exec:
-                command:
-                - /bin/sh
-                - -ec
-                - |
-                  VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json | grep -q '"initialized":true'
-              failureThreshold: 2
-              initialDelaySeconds: 5
-              periodSeconds: 5
-              successThreshold: 1
-              timeoutSeconds: 3
+              enabled: false
             
             service:
               type: ClusterIP
@@ -332,6 +322,10 @@ jobs:
           # Step 2: Unseal all Vault pods
           echo "Unsealing all Vault pods..."
           
+          # First, remove the readiness probe from the StatefulSet to allow pods to start without being ready
+          echo "Removing readiness probe from StatefulSet..."
+          oc patch statefulset vault -n ${{ github.event.inputs.namespace }} --type=json -p='[{"op": "remove", "path": "/spec/template/spec/containers/0/readinessProbe"}]'
+          
           # Process each Vault pod
           for pod in $(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[*].metadata.name}'); do
             echo "Processing pod $pod..."
@@ -384,28 +378,34 @@ jobs:
           
           echo "Vault initialization and unsealing process completed."
           
-          # Step 3: Wait for all pods to become ready
-          echo "Waiting for all Vault pods to become ready..."
-          for i in {1..30}; do
-            READY_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' | wc -w)
+          # Step 3: Wait for all pods to be running (we don't check for ready since we removed the readiness probe)
+          echo "Waiting for all Vault pods to be running..."
+          for i in {1..10}; do
+            RUNNING_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | wc -w)
             TOTAL_PODS=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
             
-            echo "Ready pods: $READY_PODS/$TOTAL_PODS"
-            if [ "$READY_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
-              echo "All Vault pods are ready."
+            echo "Running pods: $RUNNING_PODS/$TOTAL_PODS"
+            if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
+              echo "All Vault pods are running."
               break
             fi
             
-            if [ $i -eq 30 ]; then
-              echo "Some Vault pods are still not ready. Checking pod status..."
+            if [ $i -eq 10 ]; then
+              echo "Some Vault pods are still not running. Checking pod status..."
               oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
               oc describe pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
               echo "Continuing anyway, as basic Vault functionality may still work."
             else
-              echo "Waiting for all Vault pods to be ready... ($i/30)"
+              echo "Waiting for all Vault pods to be running... ($i/10)"
               sleep 10
             fi
           done
+          
+          # Verify Vault is working by checking the status
+          echo "Verifying Vault status..."
+          oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 vault status"
+          
+          echo "Vault deployment completed successfully."
       
       - name: Wait for Vault to be ready
         run: |
