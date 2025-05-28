@@ -326,12 +326,19 @@ jobs:
           NAMESPACE=${{ github.event.inputs.namespace }}
           
           # Run the combined initialization and unseal script
+          # First, validate that we have at least 3 unseal keys
+          if [ -z "${{ secrets.VAULT_UNSEAL_KEY_0 }}" ] || [ -z "${{ secrets.VAULT_UNSEAL_KEY_1 }}" ] || [ -z "${{ secrets.VAULT_UNSEAL_KEY_2 }}" ]; then
+            echo "::error::At least 3 unseal keys (VAULT_UNSEAL_KEY_0, _1, _2) must be set in GitHub Secrets"
+            exit 1
+          fi
+          
+          # Pass all available unseal keys to the script
           ./scripts/common/init_vault.sh "$NAMESPACE" \
-            ${{ secrets.VAULT_UNSEAL_KEY_0 || '' }} \
-            ${{ secrets.VAULT_UNSEAL_KEY_1 || '' }} \
-            ${{ secrets.VAULT_UNSEAL_KEY_2 || '' }} \
-            ${{ secrets.VAULT_UNSEAL_KEY_3 || '' }} \
-            ${{ secrets.VAULT_UNSEAL_KEY_4 || '' }}
+            "${{ secrets.VAULT_UNSEAL_KEY_0 }}" \
+            "${{ secrets.VAULT_UNSEAL_KEY_1 }}" \
+            "${{ secrets.VAULT_UNSEAL_KEY_2 }}" \
+            "${{ secrets.VAULT_UNSEAL_KEY_3 || '' }}" \
+            "${{ secrets.VAULT_UNSEAL_KEY_4 || '' }}"
           
           # Capture the root token from the script output
           ROOT_TOKEN=$(grep '^root_token=' $GITHUB_OUTPUT | cut -d'=' -f2-)
