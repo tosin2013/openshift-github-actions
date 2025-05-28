@@ -1,0 +1,66 @@
+apiVersion: v1
+baseDomain: ${BASE_DOMAIN}
+metadata:
+  name: ${CLUSTER_NAME}
+compute:
+- architecture: amd64
+  hyperthreading: Enabled
+  name: worker
+  platform:
+    gcp:
+      type: ${WORKER_MACHINE_TYPE}
+      rootVolume:
+        size: ${WORKER_DISK_SIZE}
+        type: ${WORKER_DISK_TYPE}
+      zones:
+        - ${REGION}-a
+        - ${REGION}-b
+        - ${REGION}-c
+  replicas: ${WORKER_COUNT}
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: master
+  platform:
+    gcp:
+      type: ${MASTER_MACHINE_TYPE}
+      rootVolume:
+        size: ${MASTER_DISK_SIZE}
+        type: ${MASTER_DISK_TYPE}
+      zones:
+        - ${REGION}-a
+        - ${REGION}-b
+        - ${REGION}-c
+  replicas: 3
+networking:
+  networkType: OVNKubernetes
+  clusterNetwork:
+  - cidr: ${CLUSTER_NETWORK_CIDR}
+    hostPrefix: ${HOST_PREFIX}
+  machineNetwork:
+  - cidr: ${MACHINE_NETWORK_CIDR}
+  serviceNetwork:
+  - ${SERVICE_NETWORK_CIDR}
+platform:
+  gcp:
+    projectID: ${PROJECT_ID}
+    region: ${REGION}
+    network: ${NETWORK}
+    controlPlaneSubnet: ${CONTROL_PLANE_SUBNET}
+    computeSubnet: ${COMPUTE_SUBNET}
+    userLabels:
+      environment: ${ENVIRONMENT}
+      project: ${PROJECT_NAME}
+      owner: ${OWNER}
+      cost-center: ${COST_CENTER}
+pullSecret: '${PULL_SECRET}'
+sshKey: '${SSH_KEY}'
+additionalTrustBundle: |
+  ${ADDITIONAL_TRUST_BUNDLE}
+imageContentSources:
+- mirrors:
+  - ${REGISTRY_MIRROR}
+  source: quay.io/openshift-release-dev/ocp-release
+- mirrors:
+  - ${REGISTRY_MIRROR}
+  source: quay.io/openshift-release-dev/ocp-v4.0-art-dev

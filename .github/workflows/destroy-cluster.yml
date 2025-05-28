@@ -1,0 +1,213 @@
+name: Destroy OpenShift Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'Cluster Name'
+        required: true
+        type: string
+      provider:
+        description: 'Cloud Provider'
+        required: true
+        type: choice
+        options:
+          - aws
+          - azure
+          - gcp
+      region:
+        description: 'Region'
+        required: true
+        type: string
+      project_id:
+        description: 'GCP Project ID (only for GCP)'
+        required: false
+        type: string
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm cluster destruction'
+        required: true
+        type: string
+
+env:
+  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+  PROVIDER: ${{ github.event.inputs.provider }}
+  REGION: ${{ github.event.inputs.region }}
+  PROJECT_ID: ${{ github.event.inputs.project_id }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+jobs:
+  validate-destroy:
+    runs-on: ubuntu-latest
+    outputs:
+      validation_status: ${{ steps.validate.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate destroy confirmation
+        id: validate
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "ERROR: Destroy confirmation failed. You must type 'DESTROY' to confirm."
+            exit 1
+          fi
+          echo "status=confirmed" >> $GITHUB_OUTPUT
+
+      - name: Validate inputs
+        run: |
+          ./scripts/common/validate-inputs.sh \
+            --provider "$PROVIDER" \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --operation destroy
+
+  destroy:
+    needs: validate-destroy
+    runs-on: ubuntu-latest
+    if: needs.validate-destroy.outputs.validation_status == 'confirmed'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          case "$PROVIDER" in
+            aws)
+              pip install awscli boto3
+              ;;
+            azure)
+              pip install azure-cli
+              ;;
+            gcp)
+              pip install google-cloud-sdk
+              ;;
+          esac
+
+      - name: Authenticate to HashiCorp Vault
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_URL }}
+          method: jwt
+          jwtGithubAudience: ${{ secrets.VAULT_JWT_AUDIENCE }}
+          role: ${{ secrets.VAULT_ROLE }}
+          secrets: |
+            secret/data/openshift/clusters/${{ env.CLUSTER_NAME }}/metadata cluster_metadata | CLUSTER_METADATA
+
+      - name: Authenticate to Cloud Provider
+        run: |
+          case "$PROVIDER" in
+            aws)
+              vault kv get -field=access_key aws/creds/openshift-installer > /tmp/aws_access_key
+              vault kv get -field=secret_key aws/creds/openshift-installer > /tmp/aws_secret_key
+              export AWS_ACCESS_KEY_ID=$(cat /tmp/aws_access_key)
+              export AWS_SECRET_ACCESS_KEY=$(cat /tmp/aws_secret_key)
+              aws sts get-caller-identity
+              ;;
+            azure)
+              vault kv get -field=client_id azure/creds/openshift-installer > /tmp/azure_client_id
+              vault kv get -field=client_secret azure/creds/openshift-installer > /tmp/azure_client_secret
+              vault kv get -field=subscription_id azure/creds/openshift-installer > /tmp/azure_subscription_id
+              vault kv get -field=tenant_id azure/creds/openshift-installer > /tmp/azure_tenant_id
+              az login --service-principal \
+                -u $(cat /tmp/azure_client_id) \
+                -p $(cat /tmp/azure_client_secret) \
+                --tenant $(cat /tmp/azure_tenant_id)
+              az account set -s $(cat /tmp/azure_subscription_id)
+              ;;
+            gcp)
+              vault kv get -field=private_key_data gcp/key/openshift-installer > /tmp/gcp-key.json
+              gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+              gcloud config set project $PROJECT_ID
+              ;;
+          esac
+
+      - name: Install OpenShift CLI
+        run: |
+          mkdir -p ~/bin
+          # Get OpenShift version from cluster metadata
+          OPENSHIFT_VERSION=$(echo "$CLUSTER_METADATA" | jq -r '.openshift_version // "4.18.0"')
+          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OPENSHIFT_VERSION/openshift-install-linux.tar.gz | tar xz -C ~/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Retrieve cluster installation directory
+        run: |
+          ./scripts/common/retrieve-cluster-data.sh \
+            --provider "$PROVIDER" \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT"
+
+      - name: Backup cluster information
+        run: |
+          ./scripts/common/backup-cluster-info.sh \
+            --provider "$PROVIDER" \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT"
+
+      - name: Destroy OpenShift Cluster
+        run: |
+          if [ -d "installation-dir" ]; then
+            openshift-install destroy cluster --dir=installation-dir --log-level=info
+          else
+            echo "WARNING: Installation directory not found. Attempting manual cleanup."
+            ./scripts/$PROVIDER/manual-cleanup.sh \
+              --cluster-name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --environment "$ENVIRONMENT"
+          fi
+
+      - name: Clean up cloud resources
+        run: |
+          ./scripts/$PROVIDER/cleanup-resources.sh \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT"
+
+      - name: Remove cluster from Vault
+        run: |
+          ./scripts/common/remove-cluster-from-vault.sh \
+            --provider "$PROVIDER" \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT"
+
+      - name: Upload destruction logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: destruction-logs-${{ env.CLUSTER_NAME }}
+          path: |
+            installation-dir/.openshift_install.log
+            cluster-backup/
+
+      - name: Cleanup temporary files
+        if: always()
+        run: |
+          rm -f /tmp/aws_* /tmp/azure_* /tmp/gcp-key.json
+          rm -rf installation-dir cluster-backup
+
+      - name: Summary
+        run: |
+          echo "## Cluster Destruction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cluster Name**: $CLUSTER_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "- **Provider**: $PROVIDER" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: $REGION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY

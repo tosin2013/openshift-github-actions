@@ -1,0 +1,225 @@
+name: Deploy OpenShift on GCP
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'Cluster Name'
+        required: true
+        type: string
+      region:
+        description: 'GCP Region'
+        required: true
+        type: choice
+        options:
+          - us-central1
+          - us-east1
+          - us-west1
+          - us-west2
+          - europe-west1
+          - europe-west2
+          - asia-southeast1
+          - asia-northeast1
+      node_count:
+        description: 'Worker Node Count'
+        required: true
+        default: '3'
+        type: string
+      machine_type:
+        description: 'Worker Machine Type'
+        required: true
+        default: 'n1-standard-4'
+        type: choice
+        options:
+          - n1-standard-2
+          - n1-standard-4
+          - n1-standard-8
+          - n1-standard-16
+          - n2-standard-2
+          - n2-standard-4
+          - n2-standard-8
+          - c2-standard-4
+          - c2-standard-8
+      openshift_version:
+        description: 'OpenShift Version'
+        required: true
+        default: '4.18.0'
+        type: string
+      base_domain:
+        description: 'Base Domain'
+        required: true
+        type: string
+      project_id:
+        description: 'GCP Project ID'
+        required: true
+        type: string
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+env:
+  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+  REGION: ${{ github.event.inputs.region }}
+  NODE_COUNT: ${{ github.event.inputs.node_count }}
+  MACHINE_TYPE: ${{ github.event.inputs.machine_type }}
+  OPENSHIFT_VERSION: ${{ github.event.inputs.openshift_version }}
+  BASE_DOMAIN: ${{ github.event.inputs.base_domain }}
+  PROJECT_ID: ${{ github.event.inputs.project_id }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      validation_status: ${{ steps.validate.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          ./scripts/common/validate-inputs.sh \
+            --provider gcp \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --node-count "$NODE_COUNT" \
+            --machine-type "$MACHINE_TYPE" \
+            --base-domain "$BASE_DOMAIN" \
+            --project-id "$PROJECT_ID"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: needs.validate.outputs.validation_status == 'success'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-cloud-sdk jinja2 pyyaml
+
+      - name: Authenticate to HashiCorp Vault
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_URL }}
+          method: jwt
+          jwtGithubAudience: ${{ secrets.VAULT_JWT_AUDIENCE }}
+          role: ${{ secrets.VAULT_ROLE }}
+          secrets: |
+            gcp/key/openshift-installer private_key_data | GCP_SERVICE_ACCOUNT_KEY ;
+            secret/data/openshift/pull-secret pullSecret | PULL_SECRET ;
+            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} private_key | SSH_PRIVATE_KEY ;
+            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} public_key | SSH_PUBLIC_KEY
+
+      - name: Install OpenShift CLI
+        run: |
+          mkdir -p ~/bin
+          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-client-linux.tar.gz | tar xz -C ~/bin
+          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-install-linux.tar.gz | tar xz -C ~/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Setup GCP authentication
+        run: |
+          echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/gcp-key.json
+          gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+          gcloud config set project ${{ env.PROJECT_ID }}
+
+      - name: Validate GCP credentials
+        run: |
+          gcloud auth list
+          gcloud projects describe ${{ env.PROJECT_ID }}
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          echo "$SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+          chmod 600 ~/.ssh/id_rsa
+          chmod 644 ~/.ssh/id_rsa.pub
+
+      - name: Generate install-config.yaml
+        run: |
+          ./scripts/common/generate-install-config.sh \
+            --provider gcp \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --node-count "$NODE_COUNT" \
+            --machine-type "$MACHINE_TYPE" \
+            --base-domain "$BASE_DOMAIN" \
+            --project-id "$PROJECT_ID" \
+            --environment "$ENVIRONMENT"
+
+      - name: Create installation manifests
+        run: |
+          mkdir -p installation-dir
+          cp install-config.yaml installation-dir/
+          openshift-install create manifests --dir=installation-dir
+
+      - name: Deploy OpenShift Cluster
+        run: |
+          openshift-install create cluster --dir=installation-dir --log-level=info
+
+      - name: Save cluster credentials
+        run: |
+          ./scripts/common/save-cluster-credentials.sh \
+            --provider gcp \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT"
+
+      - name: Configure cluster
+        run: |
+          export KUBECONFIG=installation-dir/auth/kubeconfig
+          ./scripts/common/configure-cluster.sh \
+            --provider gcp \
+            --cluster-name "$CLUSTER_NAME" \
+            --environment "$ENVIRONMENT"
+
+      - name: Validate deployment
+        run: |
+          export KUBECONFIG=installation-dir/auth/kubeconfig
+          ./tests/validation/validate-cluster.sh \
+            --provider gcp \
+            --cluster-name "$CLUSTER_NAME"
+
+      - name: Upload installation logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: gcp-installation-logs-${{ env.CLUSTER_NAME }}
+          path: installation-dir/.openshift_install.log
+
+      - name: Upload kubeconfig
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: gcp-kubeconfig-${{ env.CLUSTER_NAME }}
+          path: installation-dir/auth/kubeconfig
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          ./scripts/gcp/cleanup-failed-deployment.sh \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --project-id "$PROJECT_ID"
+
+      - name: Cleanup GCP credentials
+        if: always()
+        run: |
+          rm -f /tmp/gcp-key.json

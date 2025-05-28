@@ -1,0 +1,46 @@
+# AWS Development Environment Variables
+# Author: Tosin Akinosho
+
+# Instance Types
+WORKER_INSTANCE_TYPE: m5.xlarge
+MASTER_INSTANCE_TYPE: m5.xlarge
+
+# Storage Configuration
+WORKER_ROOT_VOLUME_SIZE: 100
+WORKER_ROOT_VOLUME_TYPE: gp3
+MASTER_ROOT_VOLUME_SIZE: 120
+MASTER_ROOT_VOLUME_TYPE: gp3
+
+# Network Configuration
+CLUSTER_NETWORK_CIDR: 10.128.0.0/14
+HOST_PREFIX: 23
+MACHINE_NETWORK_CIDR: 10.0.0.0/16
+SERVICE_NETWORK_CIDR: 172.30.0.0/16
+
+# Tagging
+ENVIRONMENT: dev
+PROJECT_NAME: openshift-multicloud
+OWNER: platform-team
+COST_CENTER: engineering
+
+# Registry Configuration (optional)
+REGISTRY_MIRROR: ""
+ADDITIONAL_TRUST_BUNDLE: ""
+
+# Default Worker Count
+WORKER_COUNT: 3
+
+# Networking Options
+OUTBOUND_TYPE: Loadbalancer
+CLOUD_NAME: AzurePublicCloud
+
+# Resource Groups (for existing infrastructure)
+BASE_DOMAIN_RESOURCE_GROUP: ""
+NETWORK_RESOURCE_GROUP: ""
+RESOURCE_GROUP_NAME: ""
+
+# Network Resources (for existing infrastructure)
+VIRTUAL_NETWORK: ""
+CONTROL_PLANE_SUBNET: ""
+COMPUTE_SUBNET: ""
+NETWORK: ""
