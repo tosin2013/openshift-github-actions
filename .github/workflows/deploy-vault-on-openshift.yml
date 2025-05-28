@@ -51,6 +51,45 @@ jobs:
         run: |
           oc create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | oc apply -f -
       
+      - name: Create Vault Security Context Constraint
+        run: |
+          cat <<EOF | oc apply -f -
+          apiVersion: security.openshift.io/v1
+          kind: SecurityContextConstraints
+          metadata:
+            name: vault-scc
+          allowHostDirVolumePlugin: false
+          allowHostIPC: false
+          allowHostNetwork: false
+          allowHostPID: false
+          allowHostPorts: false
+          allowPrivilegeEscalation: true
+          allowPrivilegedContainer: false
+          allowedCapabilities: null
+          defaultAddCapabilities: null
+          fsGroup:
+            type: RunAsAny
+          groups: []
+          priority: 10
+          readOnlyRootFilesystem: false
+          requiredDropCapabilities:
+          - ALL
+          runAsUser:
+            type: RunAsAny
+          seLinuxContext:
+            type: MustRunAs
+          supplementalGroups:
+            type: RunAsAny
+          users: []
+          volumes:
+          - configMap
+          - downwardAPI
+          - emptyDir
+          - persistentVolumeClaim
+          - projected
+          - secret
+          EOF
+      
       - name: Add HashiCorp Helm repository
         run: |
           helm repo add hashicorp https://helm.releases.hashicorp.com
@@ -61,6 +100,9 @@ jobs:
       - name: Generate Vault values file
         run: |
           cat > vault-values.yaml <<EOF
+          global:
+            openshift: true
+            
           server:
             dev:
               enabled: false
@@ -75,6 +117,11 @@ jobs:
               storageClass: ${{ github.event.inputs.storage_class }}
             ui:
               enabled: ${{ github.event.inputs.ui_enabled }}
+              # Ensure service account has proper permissions for OpenShift
+              serviceAccount:
+                create: true
+                annotations:
+                  serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"vault"}}'
           injector:
             enabled: true
           EOF
@@ -88,6 +135,17 @@ jobs:
       
       - name: Wait for Vault pods to be ready
         run: |
+          echo "Waiting for Vault pods to be ready..."
+          # First wait for service accounts to be created
+          echo "Waiting for service accounts to be created..."
+          sleep 10
+          
+          # Bind the SCC to Vault service accounts
+          echo "Binding vault-scc to Vault service accounts..."
+          oc adm policy add-scc-to-user vault-scc -z vault -n ${{ github.event.inputs.namespace }}
+          oc adm policy add-scc-to-user vault-scc -z vault-agent-injector -n ${{ github.event.inputs.namespace }}
+          
+          # Wait for pods to be ready
           echo "Waiting for Vault pods to be ready..."
           oc wait --for=condition=Ready pod -l app.kubernetes.io/name=vault --timeout=300s -n ${{ github.event.inputs.namespace }}
       
