@@ -363,7 +363,6 @@ jobs:
                   # For example, if 5 keys were generated, ensure secrets for VAULT_UNSEAL_KEY_3 and VAULT_UNSEAL_KEY_4 are also available.
                   [ ! -z "${{ secrets.VAULT_UNSEAL_KEY_3 }}" ] && echo "VAULT_UNSEAL_KEY_3=${{ secrets.VAULT_UNSEAL_KEY_3 }}" >> $GITHUB_ENV
                   [ ! -z "${{ secrets.VAULT_UNSEAL_KEY_4 }}" ] && echo "VAULT_UNSEAL_KEY_4=${{ secrets.VAULT_UNSEAL_KEY_4 }}" >> $GITHUB_ENV
-              fi
             else
               echo "Initializing Vault on vault-0 (5 keys, 3 threshold)..."
               INIT_OUTPUT=$(oc exec -n $NAMESPACE vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator init -key-shares=5 -key-threshold=3 -format=json")
@@ -387,54 +386,83 @@ jobs:
               echo "Unseal keys stored in GITHUB_ENV."
             fi
 
-            # Step 2: Unseal all Vault pods (if manual unsealing)
-            # Readiness probe is disabled via Helm values, so no need to patch StatefulSet here.
+            # Step 2: Unseal all Vault pods if manual unsealing is chosen
             echo "Proceeding to unseal all Vault pods manually..."
             for pod_name in $(oc get pods -l app.kubernetes.io/name=vault -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
               echo "Processing pod $pod_name for unsealing..."
-              SEAL_STATUS_JSON=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null || echo '{"sealed":true}')
-              IS_SEALED=$(echo "$SEAL_STATUS_JSON" | jq -r '.sealed')
+              
+              # Get current status more robustly
+              CURRENT_STATUS_OUTPUT=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+              CURRENT_STATUS_EXIT_CODE=$?
 
-              if [ "$IS_SEALED" != "true" ]; then
-                echo "Vault pod $pod_name is already unsealed."
-                continue
-              fi
+              echo "Debug: Pod $pod_name, vault status raw exit code: $CURRENT_STATUS_EXIT_CODE"
+              echo "Debug: Pod $pod_name, vault status raw output: $CURRENT_STATUS_OUTPUT"
 
-              echo "Attempting to unseal pod $pod_name..."
-              # Unseal with the first 3 keys (threshold is 3)
-              KEY_0_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_0 }}"
-              KEY_1_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_1 }}"
-              KEY_2_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_2 }}"
+              IS_POD_SEALED_FOR_UNSEAL_LOGIC="true" # Assume sealed unless proven otherwise by exit code 0 and sealed:false
 
-              if [ -z "$KEY_0_FROM_ENV" ] || [ "$KEY_0_FROM_ENV" == "unknownPreInitializedKey0" ] || [ -z "$KEY_1_FROM_ENV" ] || [ -z "$KEY_2_FROM_ENV" ]; then
-                 echo "::error::Unseal keys are not properly set in GITHUB_ENV (VAULT_UNSEAL_KEY_0/1/2). Cannot unseal $pod_name. Check secrets or init output."
-                 continue # Skip this pod, final verification will fail
+              if [ $CURRENT_STATUS_EXIT_CODE -eq 0 ]; then
+                  # Vault status succeeded, means initialized and unsealed. Verify sealed field.
+                  PARSED_SEALED_VALUE_FROM_SUCCESS=$(echo "$CURRENT_STATUS_OUTPUT" | jq -r '.sealed')
+                  if [ "$PARSED_SEALED_VALUE_FROM_SUCCESS" == "false" ]; then
+                      IS_POD_SEALED_FOR_UNSEAL_LOGIC="false"
+                  else
+                      # This case (exit 0 but sealed:true or other) is unusual but handle defensively
+                      echo "::warning::Pod $pod_name: vault status exited 0 but .sealed was not 'false' (value: '$PARSED_SEALED_VALUE_FROM_SUCCESS'). Assuming sealed."
+                      IS_POD_SEALED_FOR_UNSEAL_LOGIC="true"
+                  fi
+              elif [ $CURRENT_STATUS_EXIT_CODE -eq 2 ]; then
+                  # Vault status indicates sealed or not initialized. This means it IS sealed for our purposes.
+                  IS_POD_SEALED_FOR_UNSEAL_LOGIC="true"
+                  # We can optionally parse CURRENT_STATUS_OUTPUT here if needed for more detailed logging
+                  # e.g., PARSED_SEALED_VALUE_FROM_EXIT2=$(echo "$CURRENT_STATUS_OUTPUT" | jq -r '.sealed')
+                  # echo "Debug: Pod $pod_name, (exit 2) parsed sealed: $PARSED_SEALED_VALUE_FROM_EXIT2"
+              else
+                  # Any other exit code is an error. Assume sealed for safety and log warning.
+                  echo "::warning::Pod $pod_name: 'vault status' command failed with unexpected exit code $CURRENT_STATUS_EXIT_CODE. Output: $CURRENT_STATUS_OUTPUT. Assuming sealed."
+                  IS_POD_SEALED_FOR_UNSEAL_LOGIC="true"
               fi
               
-              UNSEAL_SUCCESS=false
-              for attempt in {1..3}; do # Retry unseal attempts
-                echo "Unseal attempt $attempt for $pod_name..."
-                oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_0_FROM_ENV" || echo "Warning: Command to apply key 0 failed for $pod_name attempt $attempt"
-                sleep 1
-                oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_1_FROM_ENV" || echo "Warning: Command to apply key 1 failed for $pod_name attempt $attempt"
-                sleep 1
-                oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_2_FROM_ENV" || echo "Warning: Command to apply key 2 failed for $pod_name attempt $attempt"
-                sleep 2
+              echo "Debug: Pod $pod_name, determined IS_POD_SEALED_FOR_UNSEAL_LOGIC: $IS_POD_SEALED_FOR_UNSEAL_LOGIC"
 
-                CURRENT_SEAL_STATUS_JSON=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null || echo '{"sealed":true}')
-                CURRENT_IS_SEALED=$(echo "$CURRENT_SEAL_STATUS_JSON" | jq -r '.sealed')
+              if [ "$IS_POD_SEALED_FOR_UNSEAL_LOGIC" == "true" ]; then
+                echo "Vault pod $pod_name is considered sealed. Attempting to unseal..."
+                # Unseal with the first 3 keys (threshold is 3)
+                KEY_0_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_0 }}"
+                KEY_1_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_1 }}"
+                KEY_2_FROM_ENV="${{ env.VAULT_UNSEAL_KEY_2 }}"
 
-                if [ "$CURRENT_IS_SEALED" != "true" ]; then
-                  echo "Successfully unsealed pod $pod_name."
-                  UNSEAL_SUCCESS=true
-                  break
+                if [ -z "$KEY_0_FROM_ENV" ] || [ "$KEY_0_FROM_ENV" == "unknownPreInitializedKey0" ] || [ -z "$KEY_1_FROM_ENV" ] || [ -z "$KEY_2_FROM_ENV" ]; then
+                   echo "::error::Unseal keys are not properly set in GITHUB_ENV (VAULT_UNSEAL_KEY_0/1/2). Cannot unseal $pod_name. Check secrets or init output."
+                   continue # Skip this pod, final verification will fail
                 fi
-                echo "Warning: Failed to unseal pod $pod_name on attempt $attempt. Retrying if attempts remain..."
-                sleep 3
-              done
+                
+                UNSEAL_SUCCESS=false
+                for attempt in {1..3}; do # Retry unseal attempts
+                  echo "Unseal attempt $attempt for $pod_name..."
+                  oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_0_FROM_ENV" || echo "Warning: Command to apply key 0 failed for $pod_name attempt $attempt"
+                  sleep 1
+                  oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_1_FROM_ENV" || echo "Warning: Command to apply key 1 failed for $pod_name attempt $attempt"
+                  sleep 1
+                  oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal $KEY_2_FROM_ENV" || echo "Warning: Command to apply key 2 failed for $pod_name attempt $attempt"
+                  sleep 2
 
-              if [ "$UNSEAL_SUCCESS" == "false" ]; then
-                echo "::error::Failed to unseal pod $pod_name after multiple attempts."
+                  CURRENT_SEAL_STATUS_JSON=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null || echo '{"sealed":true}')
+                  CURRENT_IS_SEALED=$(echo "$CURRENT_SEAL_STATUS_JSON" | jq -r '.sealed')
+
+                  if [ "$CURRENT_IS_SEALED" != "true" ]; then
+                    echo "Successfully unsealed pod $pod_name."
+                    UNSEAL_SUCCESS=true
+                    break
+                  fi
+                  echo "Warning: Failed to unseal pod $pod_name on attempt $attempt. Retrying if attempts remain..."
+                  sleep 3
+                done
+
+                if [ "$UNSEAL_SUCCESS" == "false" ]; then
+                  echo "::error::Failed to unseal pod $pod_name after multiple attempts."
+                fi
+              else
+                echo "Vault pod $pod_name is already unsealed."
               fi
             done
             echo "Manual unsealing process completed for all pods."
@@ -448,30 +476,53 @@ jobs:
 
           # Step 3: Final Verification of all pods' status
           echo "Verifying unseal and initialization status of all Vault pods..."
-          ALL_OPERATIONAL=true
+          ALL_OPERATIONAL=true # Assume all are operational until proven otherwise
           for pod_name in $(oc get pods -l app.kubernetes.io/name=vault -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
             echo "Verifying status of $pod_name..."
-            # Use a more resilient check for status, ensuring command succeeds before parsing JSON
-            STATUS_CMD_OUTPUT=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json")
-            if [ $? -ne 0 ]; then
-                echo "::error::Failed to get status from pod $pod_name. It might not be fully operational or accessible."
-                ALL_OPERATIONAL=false
-                continue
-            fi
-            FINAL_IS_INITIALIZED=$(echo "$STATUS_CMD_OUTPUT" | jq -r '.initialized')
-            FINAL_IS_SEALED=$(echo "$STATUS_CMD_OUTPUT" | jq -r '.sealed')
+            IS_POD_OPERATIONAL_THIS_ROUND=false
+            for attempt in {1..3}; do # Retry verification attempts
+              echo "Verification attempt $attempt for $pod_name..."
+              
+              set +e # Temporarily disable exit on error for vault status check
+              VAULT_STATUS_OUTPUT=$(oc exec -n $NAMESPACE $pod_name -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json")
+              OC_EXEC_EXIT_CODE=$?
+              set -e # Re-enable exit on error
 
-            if [ "$FINAL_IS_INITIALIZED" != "true" ]; then
-                echo "::error::Pod $pod_name is NOT INITIALIZED!"
-                ALL_OPERATIONAL=false
-            elif [ "$FINAL_IS_SEALED" == "true" ]; then
-                echo "::error::Pod $pod_name is INITIALIZED but still SEALED!"
-                ALL_OPERATIONAL=false
-            else
-                echo "Pod $pod_name is initialized and unsealed."
+              echo "Debug (Verification): Pod $pod_name, vault status raw exit code: $OC_EXEC_EXIT_CODE"
+              echo "Debug (Verification): Pod $pod_name, vault status raw output: $VAULT_STATUS_OUTPUT"
+
+              if [ $OC_EXEC_EXIT_CODE -eq 0 ]; then
+                IS_INITIALIZED_VERIFY=$(echo "$VAULT_STATUS_OUTPUT" | jq -r '.initialized')
+                IS_SEALED_VERIFY=$(echo "$VAULT_STATUS_OUTPUT" | jq -r '.sealed')
+                if [ "$IS_INITIALIZED_VERIFY" == "true" ] && [ "$IS_SEALED_VERIFY" == "false" ]; then
+                  echo "Pod $pod_name is initialized and unsealed."
+                  IS_POD_OPERATIONAL_THIS_ROUND=true
+                  break # Pod is operational, break from retry loop
+                else
+                  echo "Warning: Pod $pod_name status check OK (exit 0), but not fully operational. Initialized: $IS_INITIALIZED_VERIFY, Sealed: $IS_SEALED_VERIFY. Attempt $attempt/3."
+                fi
+              elif [ $OC_EXEC_EXIT_CODE -eq 2 ]; then # Vault is sealed or not initialized
+                # Try to parse output even if command failed, as vault status might still provide JSON
+                IS_INITIALIZED_VERIFY_FROM_EXIT2=$(echo "$VAULT_STATUS_OUTPUT" | jq -r '.initialized' 2>/dev/null || echo "unknown")
+                IS_SEALED_VERIFY_FROM_EXIT2=$(echo "$VAULT_STATUS_OUTPUT" | jq -r '.sealed' 2>/dev/null || echo "unknown")
+                echo "Warning: Vault pod $pod_name is not operational (vault status exit code 2). Initialized: $IS_INITIALIZED_VERIFY_FROM_EXIT2, Sealed: $IS_SEALED_VERIFY_FROM_EXIT2. Attempt $attempt/3."
+              else # Other errors from oc exec
+                echo "Warning: 'oc exec vault status' for $pod_name failed with unexpected exit code $OC_EXEC_EXIT_CODE. Output: $VAULT_STATUS_OUTPUT. Attempt $attempt/3."
+              fi
+              
+              if [ $attempt -lt 3 ]; then
+                echo "Retrying status check for $pod_name in 5 seconds..."
+                sleep 5
+              fi
+            done
+
+            if [ "$IS_POD_OPERATIONAL_THIS_ROUND" == "false" ]; then
+              echo "::error::Pod $pod_name did not become operational after 3 attempts."
+              ALL_OPERATIONAL=false
             fi
           done
 
+          # This output indicates if all pods were successfully unsealed and are operational.
           if [ "$ALL_OPERATIONAL" == "true" ]; then
             echo "All Vault pods are confirmed initialized and unsealed successfully."
             echo "all_pods_unsealed=true" >> "$GITHUB_OUTPUT"
