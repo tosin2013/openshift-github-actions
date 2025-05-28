@@ -25,22 +25,82 @@ HashiCorp Vault provides:
 - GitHub repository for OpenShift automation
 
 #### Deployment Process
-We provide a GitHub Actions workflow that automates the deployment of Vault on your OpenShift cluster:
+We provide a GitHub Actions workflow that automates the deployment of Vault on your OpenShift cluster. Follow these detailed steps to trigger the workflow:
 
-1. Navigate to the Actions tab in your GitHub repository
-2. Select the "Deploy HashiCorp Vault on OpenShift" workflow
-3. Click "Run workflow" and provide the following information:
-   - OpenShift cluster context
-   - Namespace for Vault (default: `vault`)
-   - Storage class for persistent volumes
-   - Number of Vault replicas (default: 3)
-   - Whether to enable the Vault UI (default: true)
-4. The workflow will:
-   - Deploy Vault using the official Helm chart
-   - Initialize and unseal Vault
-   - Configure authentication methods
-   - Set up necessary policies
-   - Create a Route for the Vault UI (if enabled)
+##### Prerequisites for Workflow Execution
+
+1. **OpenShift Cluster Access**
+   - Ensure you have an OpenShift cluster running (version 4.6+)
+   - You must have cluster-admin privileges on the cluster
+
+2. **GitHub Repository Setup**
+   - Fork or clone this repository to your GitHub account
+   - Ensure GitHub Actions are enabled for your repository
+
+3. **Required GitHub Secrets**
+   - Navigate to your repository's Settings → Secrets and Variables → Actions
+   - Add the following repository secrets:
+     - `OPENSHIFT_SERVER`: Your OpenShift cluster API URL (e.g., `https://api.cluster.example.com:6443`)
+     - `OPENSHIFT_TOKEN`: A token with cluster-admin privileges (create using `oc create token` or from the OpenShift web console)
+
+##### Triggering the Workflow
+
+1. **Navigate to GitHub Actions**
+   - Go to your repository on GitHub
+   - Click on the "Actions" tab at the top of the repository
+   - You should see a list of available workflows
+
+2. **Find the Vault Deployment Workflow**
+   - Look for the workflow named "Deploy HashiCorp Vault on OpenShift"
+   - If you don't see it, make sure you're on the correct branch (usually `main` or `master`)
+
+3. **Run the Workflow**
+   - Click on the "Deploy HashiCorp Vault on OpenShift" workflow
+   - Click the "Run workflow" button (dropdown on the right side)
+   - A form will appear with the following inputs:
+
+4. **Configure Workflow Parameters**
+   - **Cluster Context**: The OpenShift cluster context (usually the cluster name from your kubeconfig)
+   - **Namespace**: The namespace to deploy Vault in (default: `vault`)
+   - **Storage Class**: The storage class to use for Vault's persistent volumes (e.g., `gp2` on AWS, `managed-premium` on Azure)
+   - **Replicas**: Number of Vault replicas for high availability (recommended: 3)
+   - **UI Enabled**: Whether to enable the Vault web UI (recommended: true)
+
+5. **Start the Deployment**
+   - Click the green "Run workflow" button to start the deployment
+   - The workflow will begin executing and you can monitor its progress in real-time
+
+##### Monitoring the Deployment
+
+1. **View Workflow Progress**
+   - The workflow execution will be displayed with each step's status
+   - Click on the running workflow to see detailed logs
+
+2. **Important Outputs**
+   - When the workflow completes successfully, it will output:
+     - The URL for accessing the Vault UI (if enabled)
+     - Instructions for using the Vault instance
+
+3. **Securing Credentials**
+   - The workflow generates and displays Vault's root token and unseal keys
+   - These are sensitive credentials that should be securely stored
+   - Consider using a secure password manager or your organization's secret management system
+
+##### Troubleshooting
+
+If the workflow fails, check the following:
+
+1. **OpenShift Connectivity**
+   - Verify your OPENSHIFT_SERVER and OPENSHIFT_TOKEN secrets are correct
+   - Ensure your OpenShift cluster is accessible from the internet
+
+2. **Storage Configuration**
+   - Confirm the specified storage class exists in your cluster
+   - Verify there are sufficient resources for the requested storage
+
+3. **Permissions**
+   - Ensure the token has cluster-admin privileges
+   - Check if there are any namespace restrictions or quotas
 
 For more details on the deployment process, see the [workflow file](/.github/workflows/deploy-vault-on-openshift.yml).
 
@@ -220,20 +280,74 @@ oc exec -n vault vault-0 -- vault operator raft snapshot restore /tmp/vault-snap
 
 ### 2. Install Vault CLI
 
+> **Note:** HashiCorp has changed Vault's license to BUSL (Business Source License), which has led some package managers like Homebrew to disable their Vault formulas. Below are alternative installation methods.
+
+#### Direct Binary Download (Recommended)
+
 **macOS:**
 ```bash
-brew install vault
+# Download the latest version for macOS
+curl -O https://releases.hashicorp.com/vault/1.15.2/vault_1.15.2_darwin_amd64.zip
+
+# Unzip the package
+unzip vault_1.15.2_darwin_amd64.zip
+
+# Move the binary to a directory in your PATH
+sudo mv vault /usr/local/bin/
 ```
 
 **Linux (Ubuntu/Debian):**
 ```bash
-curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
-sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
-sudo apt-get update && sudo apt-get install vault
+# Download the latest version for Linux
+curl -O https://releases.hashicorp.com/vault/1.15.2/vault_1.15.2_linux_amd64.zip
+
+# Unzip the package
+unzip vault_1.15.2_linux_amd64.zip
+
+# Move the binary to a directory in your PATH
+sudo mv vault /usr/local/bin/
 ```
 
 **Windows:**
-Download from https://www.vaultproject.io/downloads
+```powershell
+# Download the latest version for Windows
+Invoke-WebRequest -Uri https://releases.hashicorp.com/vault/1.15.2/vault_1.15.2_windows_amd64.zip -OutFile vault.zip
+
+# Unzip the package
+Expand-Archive -Path vault.zip -DestinationPath C:\HashiCorp\Vault\
+
+# Add to PATH
+$env:Path += ";C:\HashiCorp\Vault"
+```
+
+#### Using Package Managers (When Available)
+
+**Linux (Ubuntu/Debian):**
+```bash
+# Add the HashiCorp GPG key
+curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+
+# Add the official HashiCorp repository
+sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+
+# Update and install
+sudo apt-get update && sudo apt-get install vault
+```
+
+#### Using Docker
+```bash
+# Pull the Vault image
+docker pull hashicorp/vault:latest
+
+# Run Vault in development mode
+docker run --name vault -p 8200:8200 hashicorp/vault:latest
+```
+
+#### Verify Installation
+```bash
+# Verify the installation
+vault --version
+```
 
 ### 3. Connect to HCP Vault
 
