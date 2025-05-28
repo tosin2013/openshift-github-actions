@@ -153,10 +153,26 @@ jobs:
                 enabled: true
                 setNodeId: true
             
-            # Disable Consul storage
+            # Disable Consul storage and configure environment
             extraEnvironmentVars:
               VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
               VAULT_SKIP_VERIFY: "true"
+              VAULT_DISABLE_MLOCK: "true"
+            
+            # Customize readiness probe to accept initialized but sealed nodes
+            readinessProbe:
+              enabled: true
+              exec:
+                command:
+                - /bin/sh
+                - -ec
+                - |
+                  VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json | grep -q '"initialized":true'
+              failureThreshold: 2
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 3
             
             service:
               type: ClusterIP
