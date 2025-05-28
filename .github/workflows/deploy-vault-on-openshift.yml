@@ -47,6 +47,8 @@ jobs:
           openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
           insecure_skip_tls_verify: true
       
+
+      
       - name: Create Vault namespace
         run: |
           oc create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | oc apply -f -
@@ -97,29 +99,82 @@ jobs:
           # Verify latest Vault chart version
           helm search repo hashicorp/vault --version "^0.30.0" -l 1
       
+      - name: Create PVCs for Vault
+        run: |
+          echo "Creating PVCs for Vault storage..."
+          
+          # Get the number of replicas
+          REPLICAS=${{ github.event.inputs.replicas }}
+          
+          # Create PVCs for each replica
+          for i in $(seq 0 $(($REPLICAS - 1))); do
+            cat > vault-pvc-$i.yaml <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: data-vault-$i
+            namespace: ${{ github.event.inputs.namespace }}
+            labels:
+              app.kubernetes.io/name: vault
+              app.kubernetes.io/instance: vault
+              component: server
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi
+            storageClassName: ${{ github.event.inputs.storage_class }}
+          EOF
+            
+            # Apply the PVC
+            oc apply -f vault-pvc-$i.yaml
+            echo "Created PVC for Vault replica $i"
+          done
+          
+          echo "All Vault PVCs created successfully"
+      
       - name: Generate Vault values file
         run: |
           cat > vault-values.yaml <<EOF
           global:
             openshift: true
-            
+            enabled: true
+          
           server:
             dev:
               enabled: false
+            
+            # Configure integrated storage (Raft)
             ha:
               enabled: true
               replicas: ${{ github.event.inputs.replicas }}
+              raft:
+                enabled: true
+                setNodeId: true
+            
+            # Disable Consul storage
+            extraEnvironmentVars:
+              VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
+              VAULT_SKIP_VERIFY: "true"
+            
             service:
               type: ClusterIP
+            
+            # Configure storage to use pre-created PVCs
             dataStorage:
               enabled: true
               size: 10Gi
               storageClass: ${{ github.event.inputs.storage_class }}
+              existingClaim: "data-vault-"
+            
             ui:
               enabled: ${{ github.event.inputs.ui_enabled }}
-              # Ensure service account has proper permissions for OpenShift
-              serviceAccount:
-                create: true
+            
+            # Ensure service account has proper permissions for OpenShift
+            serviceAccount:
+              create: true
+          
           injector:
             serviceAccount:
               create: true
