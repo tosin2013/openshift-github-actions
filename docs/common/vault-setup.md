@@ -22,10 +22,26 @@ HashiCorp Vault provides:
 - Existing OpenShift cluster with administrative access
 - Storage class available for persistent volumes
 - `oc` CLI and `kubectl` access to the cluster
-- GitHub repository for OpenShift automation
+- A GitHub account where you can fork this repository
 
 #### Deployment Process
 We provide a GitHub Actions workflow that automates the deployment of Vault on your OpenShift cluster. Follow these detailed steps to trigger the workflow:
+
+##### Step 1: Fork the Repository
+
+Before you begin, you must have your own copy of this repository:
+
+1. **Fork the Repository**
+   - Navigate to the main page of this repository on GitHub
+   - Click the "Fork" button in the top-right corner
+   - Wait for GitHub to create a copy in your account
+   - Once complete, you'll be redirected to your forked repository
+
+2. **Enable GitHub Actions** (if not already enabled)
+   - In your forked repository, go to the "Settings" tab
+   - Navigate to "Actions" → "General" in the left sidebar
+   - Select "Allow all actions and reusable workflows"
+   - Click "Save"
 
 ##### Prerequisites for Workflow Execution
 
@@ -33,74 +49,94 @@ We provide a GitHub Actions workflow that automates the deployment of Vault on y
    - Ensure you have an OpenShift cluster running (version 4.6+)
    - You must have cluster-admin privileges on the cluster
 
-2. **GitHub Repository Setup**
-   - Fork or clone this repository to your GitHub account
-   - Ensure GitHub Actions are enabled for your repository
-
-3. **Required GitHub Secrets**
+2. **Required GitHub Secrets**
    - Navigate to your repository's Settings → Secrets and Variables → Actions
    - Add the following repository secrets:
      - `OPENSHIFT_SERVER`: Your OpenShift cluster API URL (e.g., `https://api.cluster.example.com:6443`)
      - `OPENSHIFT_TOKEN`: A token with cluster-admin privileges (create using `oc create token` or from the OpenShift web console)
 
-##### Triggering the Workflow
+##### Step 2: Configure GitHub Secrets
+
+After forking the repository, you need to add secrets for OpenShift authentication:
+
+1. **Generate an OpenShift Token**
+   - Log in to your OpenShift cluster using the CLI: `oc login`
+   - Create a service account token with cluster-admin privileges:
+     ```bash
+     # Create a service account
+     oc create serviceaccount vault-deployer -n default
+     
+     # Grant cluster-admin role
+     oc adm policy add-cluster-role-to-user cluster-admin -z vault-deployer -n default
+     
+     # Generate a token
+     TOKEN=$(oc create token vault-deployer -n default --duration=24h)
+     echo $TOKEN
+     ```
+   - Alternatively, you can use your personal token from the OpenShift web console
+
+2. **Add Secrets to GitHub**
+   - In your forked repository, go to "Settings" → "Secrets and variables" → "Actions"
+   - Click "New repository secret"
+   - Add the following secrets:
+     - Name: `OPENSHIFT_SERVER`
+       Value: Your OpenShift API URL (e.g., `https://api.cluster.example.com:6443`)
+     - Name: `OPENSHIFT_TOKEN`
+       Value: The token you generated in the previous step
+
+##### Step 3: Run the Vault Deployment Workflow
 
 1. **Navigate to GitHub Actions**
-   - Go to your repository on GitHub
-   - Click on the "Actions" tab at the top of the repository
-   - You should see a list of available workflows
+   - In your forked repository, click on the "Actions" tab
+   - You should see the available workflows, including "Deploy HashiCorp Vault on OpenShift"
 
-2. **Find the Vault Deployment Workflow**
-   - Look for the workflow named "Deploy HashiCorp Vault on OpenShift"
-   - If you don't see it, make sure you're on the correct branch (usually `main` or `master`)
-
-3. **Run the Workflow**
-   - Click on the "Deploy HashiCorp Vault on OpenShift" workflow
-   - Click the "Run workflow" button (dropdown on the right side)
-   - A form will appear with the following inputs:
-
-4. **Configure Workflow Parameters**
-   - **Cluster Context**: The OpenShift cluster context (usually the cluster name from your kubeconfig)
-   - **Namespace**: The namespace to deploy Vault in (default: `vault`)
-   - **Storage Class**: The storage class to use for Vault's persistent volumes (e.g., `gp2` on AWS, `managed-premium` on Azure)
-   - **Replicas**: Number of Vault replicas for high availability (recommended: 3)
-   - **UI Enabled**: Whether to enable the Vault web UI (recommended: true)
-
-5. **Start the Deployment**
+2. **Start the Workflow**
+   - Click on "Deploy HashiCorp Vault on OpenShift"
+   - Click the "Run workflow" dropdown button on the right
+   - Fill in the following parameters:
+     - **Namespace**: `vault` (or your preferred namespace)
+     - **Storage Class**: Your cluster's storage class (e.g., `gp2` on AWS)
+     - **Replicas**: `3` (recommended for production) or `1` (for testing)
+     - **UI Enabled**: `true` (recommended)
    - Click the green "Run workflow" button to start the deployment
-   - The workflow will begin executing and you can monitor its progress in real-time
 
-##### Monitoring the Deployment
+3. **Monitor Deployment Progress**
+   - The workflow will start executing and show its progress
+   - Click on the running workflow to see detailed logs for each step
+   - The deployment typically takes 5-10 minutes to complete
 
-1. **View Workflow Progress**
-   - The workflow execution will be displayed with each step's status
-   - Click on the running workflow to see detailed logs
+##### Step 4: Secure Your Vault Credentials
 
-2. **Important Outputs**
-   - When the workflow completes successfully, it will output:
-     - The URL for accessing the Vault UI (if enabled)
-     - Instructions for using the Vault instance
+When the workflow completes successfully:
 
-3. **Securing Credentials**
-   - The workflow generates and displays Vault's root token and unseal keys
-   - These are sensitive credentials that should be securely stored
-   - Consider using a secure password manager or your organization's secret management system
+1. **Save the Root Token and Unseal Keys**
+   - The workflow outputs will contain Vault's root token and unseal keys
+   - **IMPORTANT**: These credentials are extremely sensitive and are only shown once
+   - Copy and store them in a secure password manager or your organization's secret management system
 
-##### Troubleshooting
+2. **Access the Vault UI**
+   - The workflow will output the URL for the Vault UI
+   - Open this URL in your browser to access the Vault web interface
+   - Log in using the root token
 
-If the workflow fails, check the following:
+##### Troubleshooting Common Issues
 
-1. **OpenShift Connectivity**
-   - Verify your OPENSHIFT_SERVER and OPENSHIFT_TOKEN secrets are correct
-   - Ensure your OpenShift cluster is accessible from the internet
+If you encounter problems during deployment:
 
-2. **Storage Configuration**
-   - Confirm the specified storage class exists in your cluster
-   - Verify there are sufficient resources for the requested storage
+1. **Authentication Failures**
+   - **Symptom**: Workflow fails with "Unauthorized" or "Forbidden" errors
+   - **Solution**: Verify your OPENSHIFT_SERVER and OPENSHIFT_TOKEN secrets
+   - **Check**: Ensure the token has not expired and has cluster-admin rights
 
-3. **Permissions**
-   - Ensure the token has cluster-admin privileges
-   - Check if there are any namespace restrictions or quotas
+2. **Storage Provisioning Issues**
+   - **Symptom**: Workflow fails when creating persistent volumes
+   - **Solution**: Verify the storage class exists and has sufficient capacity
+   - **Check**: Run `oc get sc` to list available storage classes
+
+3. **Network or Resource Constraints**
+   - **Symptom**: Pods fail to start or stay in pending state
+   - **Solution**: Check cluster resources and network policies
+   - **Check**: Run `oc describe pod -n vault` to see detailed error messages
 
 For more details on the deployment process, see the [workflow file](/.github/workflows/deploy-vault-on-openshift.yml).
 
