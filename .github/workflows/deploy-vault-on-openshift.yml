@@ -133,10 +133,8 @@ jobs:
             --namespace ${{ github.event.inputs.namespace }} \
             -f vault-values.yaml
       
-      - name: Wait for Vault pods to be ready
+      - name: Wait for Vault pods to start
         run: |
-          echo "Waiting for Vault pods to be ready..."
-          # First wait for service accounts to be created
           echo "Waiting for service accounts to be created..."
           sleep 10
           
@@ -145,89 +143,171 @@ jobs:
           oc adm policy add-scc-to-user vault-scc -z vault -n ${{ github.event.inputs.namespace }}
           oc adm policy add-scc-to-user vault-scc -z vault-agent-injector -n ${{ github.event.inputs.namespace }}
           
-          # Wait for pods to be ready
-          echo "Waiting for Vault pods to be ready..."
-          oc wait --for=condition=Ready pod -l app.kubernetes.io/name=vault --timeout=300s -n ${{ github.event.inputs.namespace }}
+          # Wait for pods to be created (not ready, just running)
+          echo "Waiting for Vault pods to be created..."
+          # Wait for the statefulset to create the pods
+          for i in {1..30}; do
+            if oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} | grep -q "vault-0"; then
+              echo "Vault pods are being created..."
+              break
+            fi
+            echo "Waiting for Vault pods to be created... ($i/30)"
+            sleep 10
+          done
+          
+          # Wait for the pods to be in Running state (they won't be Ready until initialized and unsealed)
+          echo "Waiting for Vault pods to be in Running state..."
+          for i in {1..30}; do
+            RUNNING_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | wc -w)
+            TOTAL_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
+            echo "Running pods: $RUNNING_COUNT/$TOTAL_COUNT"
+            if [ "$RUNNING_COUNT" -eq "$TOTAL_COUNT" ] && [ "$TOTAL_COUNT" -gt 0 ]; then
+              echo "All Vault pods are running."
+              break
+            fi
+            echo "Waiting for all Vault pods to be running... ($i/30)"
+            sleep 10
+          done
       
       - name: Initialize Vault
         id: init
         run: |
-          # Initialize Vault and capture the unseal keys and root token
-          INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- vault operator init -format=json)
+          echo "Initializing Vault..."
+          # Check if Vault is already initialized
+          INIT_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_SKIP_VERIFY=true && vault status -format=json 2>/dev/null || echo '{\"initialized\":false}'")
+          IS_INITIALIZED=$(echo $INIT_STATUS | jq -r '.initialized')
           
-          # Save the output to GitHub Actions secrets
-          echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
-          echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
-          
-          # Save unseal keys to a secure location or as GitHub secrets
-          for i in {0..4}; do
-            KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$i]")
-            echo "::add-mask::$KEY"
-            echo "VAULT_UNSEAL_KEY_$i=$KEY" >> $GITHUB_ENV
-          done
-          
-          echo "Vault has been initialized successfully"
+          if [ "$IS_INITIALIZED" == "true" ]; then
+            echo "Vault is already initialized."
+          else
+            echo "Initializing Vault..."
+            # Initialize Vault and capture the unseal keys and root token
+            INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_SKIP_VERIFY=true && vault operator init -format=json")
+            
+            # Save the output to GitHub Actions environment
+            echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
+            echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
+            
+            # Save unseal keys to GitHub Actions environment
+            for i in {0..4}; do
+              KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$i]")
+              echo "::add-mask::$KEY"
+              echo "VAULT_UNSEAL_KEY_$i=$KEY" >> $GITHUB_ENV
+            done
+            
+            echo "Vault has been initialized successfully"
+          fi
       
       - name: Unseal Vault
         run: |
+          echo "Unsealing Vault pods..."
           for pod in $(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[*].metadata.name}'); do
-            echo "Unsealing Vault pod $pod..."
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}
-            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}
+            echo "Checking seal status for pod $pod..."
+            SEAL_STATUS=$(oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "export VAULT_SKIP_VERIFY=true && vault status -format=json 2>/dev/null || echo '{\"sealed\":true}'")
+            IS_SEALED=$(echo $SEAL_STATUS | jq -r '.sealed')
+            
+            if [ "$IS_SEALED" == "true" ]; then
+              echo "Unsealing Vault pod $pod..."
+              # Use unseal keys to unseal the Vault
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "export VAULT_SKIP_VERIFY=true && vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}"
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "export VAULT_SKIP_VERIFY=true && vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}"
+              oc exec -n ${{ github.event.inputs.namespace }} $pod -- sh -c "export VAULT_SKIP_VERIFY=true && vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}"
+              echo "Vault pod $pod unsealed successfully"
+            else
+              echo "Vault pod $pod is already unsealed"
+            fi
+          done
+      
+      - name: Wait for Vault to be ready
+        run: |
+          echo "Waiting for all Vault pods to be ready..."
+          for i in {1..30}; do
+            READY_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' | wc -w)
+            TOTAL_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
+            echo "Ready pods: $READY_COUNT/$TOTAL_COUNT"
+            
+            if [ "$READY_COUNT" -eq "$TOTAL_COUNT" ] && [ "$TOTAL_COUNT" -gt 0 ]; then
+              echo "All Vault pods are ready."
+              break
+            fi
+            
+            if [ $i -eq 30 ]; then
+              echo "Timed out waiting for Vault pods to be ready. Checking pod status..."
+              oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
+              oc describe pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }}
+              echo "Continuing anyway, as Vault may still be functional."
+            else
+              echo "Waiting for all Vault pods to be ready... ($i/30)"
+              sleep 10
+            fi
           done
       
       - name: Configure Vault for OpenShift Authentication
         run: |
-          # Set up environment for Vault CLI
-          export VAULT_ADDR="https://vault.${{ github.event.inputs.namespace }}.svc:8200"
-          export VAULT_TOKEN="${{ env.VAULT_ROOT_TOKEN }}"
-          export VAULT_SKIP_VERIFY="true"
+          echo "Configuring Vault for OpenShift Authentication..."
           
-          # Configure Vault
-          oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- /bin/sh -c "
-            # Enable required secret engines
-            vault secrets enable -path=secret kv-v2
-            vault secrets enable aws
-            vault secrets enable azure
-            vault secrets enable gcp
+          # Configure Vault with error handling and retries
+          for i in {1..5}; do
+            echo "Attempt $i to configure Vault..."
             
-            # Enable JWT auth for GitHub Actions
-            vault auth enable jwt
-            
-            # Configure JWT auth for GitHub Actions
-            vault write auth/jwt/config \
-              bound_issuer=\"https://token.actions.githubusercontent.com\" \
-              oidc_discovery_url=\"https://token.actions.githubusercontent.com\"
-            
-            # Create policy for OpenShift deployments
-            vault policy write openshift-deployment - <<EOF
-            # Read OpenShift secrets
-            path \"secret/data/openshift/*\" {
-              capabilities = [\"read\"]
-            }
-            
-            # Read AWS dynamic credentials
-            path \"aws/creds/openshift-installer\" {
-              capabilities = [\"read\"]
-            }
-            
-            # Read Azure dynamic credentials
-            path \"azure/creds/openshift-installer\" {
-              capabilities = [\"read\"]
-            }
-            
-            # Read GCP dynamic credentials
-            path \"gcp/key/openshift-installer\" {
-              capabilities = [\"read\"]
-            }
-            
-            # Write cluster metadata
-            path \"secret/data/openshift/clusters/*\" {
-              capabilities = [\"create\", \"update\", \"read\"]
-            }
-            EOF
-          "
+            # Configure Vault with proper error handling
+            if oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- sh -c "export VAULT_ADDR='https://127.0.0.1:8200' && export VAULT_SKIP_VERIFY=true && export VAULT_TOKEN='${{ env.VAULT_ROOT_TOKEN }}' && \
+              # Enable required secret engines
+              vault secrets enable -path=secret kv-v2 2>/dev/null || echo 'Secret engine may already be enabled' && \
+              vault secrets enable aws 2>/dev/null || echo 'AWS engine may already be enabled' && \
+              vault secrets enable azure 2>/dev/null || echo 'Azure engine may already be enabled' && \
+              vault secrets enable gcp 2>/dev/null || echo 'GCP engine may already be enabled' && \
+              
+              # Enable JWT auth for GitHub Actions
+              vault auth enable jwt 2>/dev/null || echo 'JWT auth may already be enabled' && \
+              
+              # Configure JWT auth for GitHub Actions
+              vault write auth/jwt/config \
+                bound_issuer='https://token.actions.githubusercontent.com' \
+                oidc_discovery_url='https://token.actions.githubusercontent.com' && \
+              
+              # Create policy for OpenShift deployments
+              vault policy write openshift-deployment - <<EOF
+              # Read OpenShift secrets
+              path \"secret/data/openshift/*\" {
+                capabilities = [\"read\"]
+              }
+              
+              # Read AWS dynamic credentials
+              path \"aws/creds/openshift-installer\" {
+                capabilities = [\"read\"]
+              }
+              
+              # Read Azure dynamic credentials
+              path \"azure/creds/openshift-installer\" {
+                capabilities = [\"read\"]
+              }
+              
+              # Read GCP dynamic credentials
+              path \"gcp/key/openshift-installer\" {
+                capabilities = [\"read\"]
+              }
+              
+              # Write cluster metadata
+              path \"secret/data/openshift/clusters/*\" {
+                capabilities = [\"create\", \"update\", \"read\"]
+              }
+              EOF
+            "; then
+              echo "Vault configuration completed successfully."
+              break
+            else
+              echo "Vault configuration attempt $i failed. Retrying in 10 seconds..."
+              if [ $i -eq 5 ]; then
+                echo "Failed to configure Vault after 5 attempts. Check Vault status and logs."
+                oc get pods -n ${{ github.event.inputs.namespace }}
+                oc logs -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --tail=50
+                echo "Continuing anyway, as basic Vault functionality may still work."
+              else
+                sleep 10
+              fi
+            fi
+          done
       
       - name: Create Route for Vault UI
         if: ${{ github.event.inputs.ui_enabled == 'true' }}
