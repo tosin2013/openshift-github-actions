@@ -1,0 +1,36 @@
+# GCP Development Environment Variables
+# Author: Tosin Akinosho
+
+# Machine Types
+WORKER_MACHINE_TYPE: n1-standard-4
+MASTER_MACHINE_TYPE: n1-standard-4
+
+# Storage Configuration
+WORKER_DISK_SIZE: 100
+WORKER_DISK_TYPE: pd-ssd
+MASTER_DISK_SIZE: 120
+MASTER_DISK_TYPE: pd-ssd
+
+# Network Configuration
+CLUSTER_NETWORK_CIDR: 10.128.0.0/14
+HOST_PREFIX: 23
+MACHINE_NETWORK_CIDR: 10.0.0.0/16
+SERVICE_NETWORK_CIDR: 172.30.0.0/16
+
+# Labeling
+ENVIRONMENT: dev
+PROJECT_NAME: openshift-multicloud
+OWNER: platform-team
+COST_CENTER: engineering
+
+# Registry Configuration (optional)
+REGISTRY_MIRROR: ""
+ADDITIONAL_TRUST_BUNDLE: ""
+
+# Default Worker Count
+WORKER_COUNT: 3
+
+# Network Resources (for existing infrastructure)
+NETWORK: ""
+CONTROL_PLANE_SUBNET: ""
+COMPUTE_SUBNET: ""

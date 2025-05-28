@@ -1,0 +1,212 @@
+name: Deploy HashiCorp Vault on OpenShift
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_context:
+        description: 'OpenShift cluster context from kubeconfig'
+        required: true
+        type: string
+      namespace:
+        description: 'Namespace to deploy Vault in'
+        required: true
+        default: 'vault'
+        type: string
+      storage_class:
+        description: 'Storage class for Vault persistent volume'
+        required: true
+        type: string
+      replicas:
+        description: 'Number of Vault replicas'
+        required: true
+        default: '3'
+        type: string
+      ui_enabled:
+        description: 'Enable Vault UI'
+        required: true
+        default: 'true'
+        type: boolean
+
+jobs:
+  deploy-vault:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up OpenShift CLI
+        uses: redhat-actions/oc-installer@v1
+        with:
+          oc_version: '4.12'
+      
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.10.0'
+      
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+      
+      - name: Create Vault namespace
+        run: |
+          oc create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | oc apply -f -
+      
+      - name: Add HashiCorp Helm repository
+        run: |
+          helm repo add hashicorp https://helm.releases.hashicorp.com
+          helm repo update
+      
+      - name: Generate Vault values file
+        run: |
+          cat > vault-values.yaml <<EOF
+          server:
+            dev:
+              enabled: false
+            ha:
+              enabled: true
+              replicas: ${{ github.event.inputs.replicas }}
+            service:
+              type: ClusterIP
+            dataStorage:
+              enabled: true
+              size: 10Gi
+              storageClass: ${{ github.event.inputs.storage_class }}
+            ui:
+              enabled: ${{ github.event.inputs.ui_enabled }}
+          injector:
+            enabled: true
+          EOF
+      
+      - name: Deploy Vault with Helm
+        run: |
+          helm install vault hashicorp/vault \
+            --namespace ${{ github.event.inputs.namespace }} \
+            -f vault-values.yaml
+      
+      - name: Wait for Vault pods to be ready
+        run: |
+          echo "Waiting for Vault pods to be ready..."
+          oc wait --for=condition=Ready pod -l app.kubernetes.io/name=vault --timeout=300s -n ${{ github.event.inputs.namespace }}
+      
+      - name: Initialize Vault
+        id: init
+        run: |
+          # Initialize Vault and capture the unseal keys and root token
+          INIT_OUTPUT=$(oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- vault operator init -format=json)
+          
+          # Save the output to GitHub Actions secrets
+          echo "::add-mask::$(echo $INIT_OUTPUT | jq -r '.root_token')"
+          echo "VAULT_ROOT_TOKEN=$(echo $INIT_OUTPUT | jq -r '.root_token')" >> $GITHUB_ENV
+          
+          # Save unseal keys to a secure location or as GitHub secrets
+          for i in {0..4}; do
+            KEY=$(echo $INIT_OUTPUT | jq -r ".unseal_keys_b64[$i]")
+            echo "::add-mask::$KEY"
+            echo "VAULT_UNSEAL_KEY_$i=$KEY" >> $GITHUB_ENV
+          done
+          
+          echo "Vault has been initialized successfully"
+      
+      - name: Unseal Vault
+        run: |
+          for pod in $(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[*].metadata.name}'); do
+            echo "Unsealing Vault pod $pod..."
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_0 }}
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_1 }}
+            oc exec -n ${{ github.event.inputs.namespace }} $pod -- vault operator unseal ${{ env.VAULT_UNSEAL_KEY_2 }}
+          done
+      
+      - name: Configure Vault for OpenShift Authentication
+        run: |
+          # Set up environment for Vault CLI
+          export VAULT_ADDR="https://vault.${{ github.event.inputs.namespace }}.svc:8200"
+          export VAULT_TOKEN="${{ env.VAULT_ROOT_TOKEN }}"
+          export VAULT_SKIP_VERIFY="true"
+          
+          # Configure Vault
+          oc exec -n ${{ github.event.inputs.namespace }} vault-0 -- /bin/sh -c "
+            # Enable required secret engines
+            vault secrets enable -path=secret kv-v2
+            vault secrets enable aws
+            vault secrets enable azure
+            vault secrets enable gcp
+            
+            # Enable JWT auth for GitHub Actions
+            vault auth enable jwt
+            
+            # Configure JWT auth for GitHub Actions
+            vault write auth/jwt/config \
+              bound_issuer=\"https://token.actions.githubusercontent.com\" \
+              oidc_discovery_url=\"https://token.actions.githubusercontent.com\"
+            
+            # Create policy for OpenShift deployments
+            vault policy write openshift-deployment - <<EOF
+            # Read OpenShift secrets
+            path \"secret/data/openshift/*\" {
+              capabilities = [\"read\"]
+            }
+            
+            # Read AWS dynamic credentials
+            path \"aws/creds/openshift-installer\" {
+              capabilities = [\"read\"]
+            }
+            
+            # Read Azure dynamic credentials
+            path \"azure/creds/openshift-installer\" {
+              capabilities = [\"read\"]
+            }
+            
+            # Read GCP dynamic credentials
+            path \"gcp/key/openshift-installer\" {
+              capabilities = [\"read\"]
+            }
+            
+            # Write cluster metadata
+            path \"secret/data/openshift/clusters/*\" {
+              capabilities = [\"create\", \"update\", \"read\"]
+            }
+            EOF
+          "
+      
+      - name: Create Route for Vault UI
+        if: ${{ github.event.inputs.ui_enabled == 'true' }}
+        run: |
+          cat <<EOF | oc apply -f -
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: vault
+            namespace: ${{ github.event.inputs.namespace }}
+          spec:
+            port:
+              targetPort: 8200
+            tls:
+              termination: passthrough
+            to:
+              kind: Service
+              name: vault
+              weight: 100
+          EOF
+          
+          VAULT_ROUTE=$(oc get route vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.spec.host}')
+          echo "Vault UI is accessible at: https://$VAULT_ROUTE"
+          echo "VAULT_ROUTE=$VAULT_ROUTE" >> $GITHUB_ENV
+      
+      - name: Output Vault Information
+        run: |
+          echo "Vault has been successfully deployed to OpenShift"
+          echo "Namespace: ${{ github.event.inputs.namespace }}"
+          if [[ "${{ github.event.inputs.ui_enabled }}" == "true" ]]; then
+            echo "Vault UI URL: https://${{ env.VAULT_ROUTE }}"
+          fi
+          echo "To use Vault, you'll need the root token and unseal keys that were generated"
+          echo "These have been stored as outputs of this workflow run"
+          
+          # Instructions for configuring GitHub repository
+          echo "To configure your GitHub repository to use this Vault instance:"
+          echo "1. Create GitHub repository secrets for VAULT_ADDR and VAULT_ROLE"
+          echo "2. Update your GitHub Actions workflows to authenticate with this Vault instance"
