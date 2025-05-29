@@ -79,35 +79,34 @@ jobs:
           metadata:
             name: vault-scc
           allowHostDirVolumePlugin: false
-          allowHostIPC: false
+          allowHostIPC: false # Vault may use IPC, but with mlock disabled, this might be okay. Test.
           allowHostNetwork: false
           allowHostPID: false
           allowHostPorts: false
-          allowPrivilegeEscalation: true
+          allowPrivilegeEscalation: true # Often needed by Vault
           allowPrivilegedContainer: false
-          allowedCapabilities: null
+          allowedCapabilities: # IPC_LOCK is common if mlock is not disabled. Since it is, this might be empty or minimal.
+            # - IPC_LOCK # Add if testing reveals VAULT_DISABLE_MLOCK="true" is not sufficient or desired.
+            - NET_BIND_SERVICE # To bind to low ports if not running as root (though Vault usually runs >1024)
           defaultAddCapabilities: null
           fsGroup:
             type: RunAsAny
-          groups: []
-          priority: 10
           readOnlyRootFilesystem: false
           requiredDropCapabilities:
-          - ALL
+            - MKNOD # Example of a commonly dropped capability
           runAsUser:
-            type: RunAsAny
+            type: RunAsAny # Consider restricting to a specific UID range used by the Vault image/container
           seLinuxContext:
-            type: MustRunAs
+            type: MustRunAs # Or RunAsAny, consult Vault image requirements & OpenShift policy
           supplementalGroups:
             type: RunAsAny
-          users: []
           volumes:
-          - configMap
-          - downwardAPI
-          - emptyDir
-          - persistentVolumeClaim
-          - projected
-          - secret
+            - configMap
+            - downwardAPI
+            - emptyDir
+            - persistentVolumeClaim
+            - projected
+            - secret
           EOF
       
       - name: Add HashiCorp Helm repository
@@ -116,6 +115,77 @@ jobs:
           helm repo update
           # Verify latest Vault chart version
           helm search repo hashicorp/vault --version "^0.30.0" -l 1
+      
+      - name: Create Vault ServiceAccount
+        run: |
+          cat <<EOF | oc apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: vault
+            namespace: ${{ github.event.inputs.namespace }}
+            labels:
+              app.kubernetes.io/name: vault
+              app.kubernetes.io/instance: vault
+          EOF
+      
+      - name: Create Role and RoleBinding for TokenReview
+        run: |
+          cat <<EOF | oc apply -f -
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: vault-tokenreviewer
+            namespace: ${{ github.event.inputs.namespace }}
+          rules:
+          - apiGroups: ["authentication.k8s.io"]
+            resources: ["tokenreviews"]
+            verbs: ["create"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: vault-tokenreviewer-binding
+            namespace: ${{ github.event.inputs.namespace }}
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: vault-tokenreviewer
+          subjects:
+          - kind: ServiceAccount
+            name: vault
+            namespace: ${{ github.event.inputs.namespace }}
+          EOF
+      
+      - name: Bind vault-scc to vault ServiceAccount
+        run: |
+          oc adm policy add-scc-to-user vault-scc -z vault -n ${{ github.event.inputs.namespace }}
+      
+      - name: Generate TLS Certificate and Create Secret
+        run: |
+          NAMESPACE=${{ github.event.inputs.namespace }}
+          # Attempt to discover apps domain. This is a common OpenShift pattern but might need adjustment.
+          # Fallback to a placeholder if discovery fails, consider making APPS_DOMAIN an input for robustness.
+          APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
+          
+          echo "Generating self-signed TLS certificate for Vault..."
+          echo "Using APPS_DOMAIN: $APPS_DOMAIN for one of the SANs."
+          
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout vault.key -out vault.crt \
+            -subj "/CN=vault.$NAMESPACE.svc/O=Vault" \
+            -addext "subjectAltName = DNS:vault,DNS:vault.$NAMESPACE,DNS:vault.$NAMESPACE.svc,DNS:vault.$NAMESPACE.svc.cluster.local,DNS:localhost,DNS:vault.$APPS_DOMAIN"
+
+          echo "Creating Kubernetes TLS secret 'vault-tls'..."
+          oc create secret tls vault-tls \
+            --cert=vault.crt \
+            --key=vault.key \
+            -n $NAMESPACE \
+            --dry-run=client -o yaml | oc apply -f -
+          
+          echo "TLS secret 'vault-tls' created."
+          # Clean up local cert files
+          rm -f vault.key vault.crt
       
       - name: Create PVCs for Vault
         run: |
@@ -167,40 +237,62 @@ jobs:
           
           server:
             dev:
-              enabled: false
+              enabled: false # Ensure dev mode is explicitly disabled for HA
             
-            # Configure integrated storage (Raft) based on retrospective lessons
+            # Configure integrated storage (Raft)
             ha:
               enabled: true
               replicas: ${{ github.event.inputs.replicas }}
               raft:
                 enabled: true
                 setNodeId: true
-                # Ensure proper leader election in HA mode
                 leaderElectionTimeout: "5s"
                 leaderLeaseTimeout: "5s"
                 retryJoin:
                   enabled: true
+              # Inject HCL configuration for TLS listener and API/Cluster addresses
+              config: |
+                ui = true
+                
+                listener "tcp" {
+                  address = "0.0.0.0:8200"
+                  cluster_address = "0.0.0.0:8201"
+                  tls_cert_file = "/vault/userconfig/tls/tls.crt"
+                  tls_key_file  = "/vault/userconfig/tls/tls.key"
+                  # Enable TLS Client CA for mTLS if needed in the future
+                  # tls_client_ca_file = "/vault/userconfig/tls/client_ca.crt" 
+                }
+
+                storage "raft" {
+                  path = "/vault/data"
+                  node_id = "${HOSTNAME}" # Will be substituted by Vault
+                }
+
+                # Set API and Cluster addresses to use HTTPS
+                api_addr = "https://0.0.0.0:8200" # Pod IP, will be NAT'd by service
+                # cluster_addr will be handled by Vault/Helm chart for HA communication
             
-            # Environment variables based on retrospective lessons
+            # Mount the TLS secret
+            extraVolumes:
+              - type: secret
+                name: vault-tls # Name of the secret created earlier
+                path: /vault/userconfig/tls # Mount path for the secret
+            
+            # Updated Environment variables
             extraEnvironmentVars:
-              # Critical for OpenShift deployment
               VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
-              VAULT_SKIP_VERIFY: "true"
+              VAULT_SKIP_VERIFY: "true" # Keep for self-signed certs during internal comms if needed
               VAULT_DISABLE_MLOCK: "true"
-              # Improve logging for troubleshooting
               VAULT_LOG_LEVEL: "info"
+              VAULT_ADDR: "https://localhost:8200" # For CLI use within the pod
+              VAULT_API_ADDR: "https://0.0.0.0:8200" # For Vault to listen on all interfaces HTTPS
             
-            # Disable readiness probe to allow pods to start without being ready
-            # Lesson learned: Default probe is too strict for OpenShift environments
             readinessProbe:
-              enabled: false
+              enabled: false # Keep disabled as per previous lessons
             
-            # Configure security context for OpenShift compatibility
-            # Lesson learned: OpenShift has strict security requirements
             securityContext:
               runAsNonRoot: true
-              runAsUser: 100
+              runAsUser: 100 # Or the UID used by the Vault image
               capabilities:
                 drop:
                 - ALL
@@ -208,30 +300,29 @@ jobs:
             service:
               type: ClusterIP
             
-            # Configure storage to use pre-created PVCs
-            # Lesson learned: Pre-creating PVCs ensures proper storage configuration
             dataStorage:
               enabled: true
               size: 10Gi
               storageClass: ${{ github.event.inputs.storage_class }}
-              existingClaim: "data-vault-"
             
             ui:
-              enabled: ${{ github.event.inputs.ui_enabled }}
+              enabled: ${{ github.event.inputs.ui_enabled }} # This is already in ha.config, but keep for chart's top-level UI toggle
             
-            # Ensure service account has proper permissions for OpenShift
+            # Use the manually created ServiceAccount
             serviceAccount:
-              create: true
-              annotations:
-                # Explicitly annotate for OpenShift security context constraints
-                "openshift.io/scc": "vault-scc"
+              create: false # We created it manually
+              name: vault # Name of the SA created earlier
+              # Annotations for SCC are no longer needed here as we bind it directly
           
           injector:
+            # Assuming injector also needs to use a specific SA if it's being modified,
+            # but the primary focus is the Vault server SA.
+            # If injector is used, its SA (vault-injector) also needs SCC binding.
             serviceAccount:
-              create: true
-              name: vault-injector
-              annotations:
-                "openshift.io/scc": "vault-scc"
+              create: true # Or false if 'vault-injector' SA is also manually created and configured
+              name: vault-injector # Default name, ensure it exists or is created with proper SCC
+              # annotations:
+              #   "openshift.io/scc": "vault-scc" # If this SA is used and needs the same SCC
           EOF
           
           # Deploy Vault using Helm with the values file
@@ -315,102 +406,22 @@ jobs:
       - name: Initialize and Unseal Vault (if manual unseal)
         if: github.event.inputs.auto_unseal == 'false'
         id: initialize_unseal_vault
+        env:
+          # Pass GitHub Actions inputs and secrets to the script environment
+          GITHUB_EVENT_INPUTS_NAMESPACE: ${{ github.event.inputs.namespace }}
+          GITHUB_EVENT_INPUTS_REPLICAS: ${{ github.event.inputs.replicas }}
+          GITHUB_EVENT_INPUTS_AUTO_UNSEAL: ${{ github.event.inputs.auto_unseal }}
+          # SECRETS_VAULT_ROOT_TOKEN will be used by the script if Vault is already initialized
+          SECRETS_VAULT_ROOT_TOKEN: ${{ secrets.VAULT_ROOT_TOKEN }}
+          SECRETS_VAULT_UNSEAL_KEY_0: ${{ secrets.VAULT_UNSEAL_KEY_0 }}
+          SECRETS_VAULT_UNSEAL_KEY_1: ${{ secrets.VAULT_UNSEAL_KEY_1 }}
+          SECRETS_VAULT_UNSEAL_KEY_2: ${{ secrets.VAULT_UNSEAL_KEY_2 }}
+          SECRETS_VAULT_UNSEAL_KEY_3: ${{ secrets.VAULT_UNSEAL_KEY_3 }}
+          SECRETS_VAULT_UNSEAL_KEY_4: ${{ secrets.VAULT_UNSEAL_KEY_4 }}
         run: |
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          
-          echo "Initializing Vault and generating unseal keys..."
-          
-          # Check if Vault is already initialized
-          VAULT_STATUS=$(oc exec -n $NAMESPACE vault-0 -- vault status -format=json 2>/dev/null || true)
-          if [ -n "$VAULT_STATUS" ] && echo "$VAULT_STATUS" | jq -e '.initialized == true' >/dev/null; then
-            echo "Vault is already initialized"
-            
-            # Get existing unseal keys from environment or prompt user
-            if [ -n "${{ secrets.VAULT_UNSEAL_KEY_0 }}" ] && [ -n "${{ secrets.VAULT_UNSEAL_KEY_1 }}" ] && [ -n "${{ secrets.VAULT_UNSEAL_KEY_2 }}" ]; then
-              echo "Using existing unseal keys from GitHub Secrets"
-              UNSEAL_KEYS=(
-                "${{ secrets.VAULT_UNSEAL_KEY_0 }}"
-                "${{ secrets.VAULT_UNSEAL_KEY_1 }}"
-                "${{ secrets.VAULT_UNSEAL_KEY_2 }}"
-                "${{ secrets.VAULT_UNSEAL_KEY_3 || '' }}"
-                "${{ secrets.VAULT_UNSEAL_KEY_4 || '' }}"
-              )
-              ROOT_TOKEN="${{ secrets.VAULT_ROOT_TOKEN }}"
-            else
-              echo "::error::Vault is already initialized but no unseal keys found in GitHub Secrets"
-              exit 1
-            fi
-          else
-            # Initialize Vault and capture the output
-            echo "Initializing Vault..."
-            INIT_OUTPUT=$(oc exec -n $NAMESPACE vault-0 -- vault operator init -key-shares=5 -key-threshold=3 -format=json 2>&1)
-            
-            if [ $? -ne 0 ]; then
-              echo "::error::Failed to initialize Vault: $INIT_OUTPUT"
-              exit 1
-            fi
-            
-            # Parse the initialization output to get unseal keys and root token
-            UNSEAL_KEYS=($(echo "$INIT_OUTPUT" | jq -r '.unseal_keys_b64[]'))
-            ROOT_TOKEN=$(echo "$INIT_OUTPUT" | jq -r '.root_token')
-            
-            if [ -z "$ROOT_TOKEN" ] || [ "${#UNSEAL_KEYS[@]}" -lt 3 ]; then
-              echo "::error::Failed to parse Vault initialization output"
-              exit 1
-            fi
-            
-            # Store the keys and token in GitHub environment for future use
-            echo "VAULT_ROOT_TOKEN=$ROOT_TOKEN" >> $GITHUB_ENV
-          fi
-          
-          # Mask the sensitive values in logs
-          echo "::add-mask::$ROOT_TOKEN"
-          for i in "${!UNSEAL_KEYS[@]}"; do
-            echo "::add-mask::${UNSEAL_KEYS[$i]}"
-          done
-          
-          # Unseal the first node (vault-0)
-          echo "Unsealing vault-0..."
-          for KEY in "${UNSEAL_KEYS[@]:0:3}"; do
-            oc exec -n $NAMESPACE vault-0 -- vault operator unseal $KEY
-          done
-          
-          # Wait a bit for the first node to be fully unsealed
-          echo "Waiting for vault-0 to be fully unsealed..."
-          sleep 10
-          
-          # Get the Raft join address from the first node
-          RAFT_JOIN_ADDR=$(oc get svc -n $NAMESPACE vault-active -o jsonpath='{.spec.clusterIP}')
-          if [ -z "$RAFT_JOIN_ADDR" ]; then
-            echo "::error::Failed to get Raft join address"
-            exit 1
-          fi
-          
-          # Join other nodes to the Raft cluster and unseal them
-          for POD in $(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=vault -o name | grep -v 'vault-0'); do
-            echo "Joining $POD to Raft cluster..."
-            oc exec -n $NAMESPACE $POD -- vault operator raft join http://$RAFT_JOIN_ADDR:8200
-            
-            # Wait a bit before unsealing
-            sleep 5
-            
-            echo "Unsealing $POD..."
-            for KEY in "${UNSEAL_KEYS[@]:0:3}"; do
-              oc exec -n $NAMESPACE $POD -- vault operator unseal $KEY
-            done
-          done
-          
-          # Verify Vault cluster status
-          echo "Verifying Vault cluster status..."
-          oc exec -n $NAMESPACE vault-0 -- vault status
-          
-          # Output the root token and unseal keys (masked in logs)
-          echo "Vault initialization complete. Please securely store these values:"
-          echo "Root Token: $ROOT_TOKEN"
-          echo "Unseal Keys (first 3 required for unsealing):"
-          for i in "${!UNSEAL_KEYS[@]}"; do
-            echo "Key $((i+1)): ${UNSEAL_KEYS[$i]}"
-          done
+          echo "Executing scripts/common/initialize_unseal_vault.sh for manual initialization and unsealing..."
+          chmod +x ./scripts/common/initialize_unseal_vault.sh
+          ./scripts/common/initialize_unseal_vault.sh
       
       # Verify Vault status after initialization/unsealing
       - name: Verify Vault status
@@ -422,7 +433,7 @@ jobs:
           echo "Verifying Vault status with a timeout of $TIMEOUT seconds..."
           
           # Check if any Vault pods are unsealed
-          if oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status" 2>/dev/null | grep -q 'Sealed.*false'; then
+          if oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status" 2>/dev/null | grep -q 'Sealed.*false'; then
             echo "✅ Vault is unsealed and operational"
             exit 0
           else
@@ -459,25 +470,78 @@ jobs:
           
           exit 1
       
-      - name: Configure Vault for OpenShift Authentication
+      - name: Configure Kubernetes Auth Method in Vault
         if: steps.verify_vault_status.conclusion == 'success'
+        env:
+          VAULT_ROOT_TOKEN: ${{ env.VAULT_ROOT_TOKEN }}
+          NAMESPACE: ${{ github.event.inputs.namespace }}
         run: |
-          echo "Configuring Vault for OpenShift Authentication..."
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          
-          # Check if Vault is reachable
-          if ! oc exec -n $NAMESPACE vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status" 2>/dev/null | grep -q 'Sealed.*false'; then
-            echo "::error::Vault is not unsealed or not responding"
+          echo "Configuring Kubernetes authentication method in Vault..."
+
+          echo "Retrieving token for 'vault' service account..."
+          VAULT_SA_TOKEN=$(oc sa get-token vault -n "$NAMESPACE")
+          if [ -z "$VAULT_SA_TOKEN" ]; then
+            echo "::error::Failed to retrieve token for 'vault' service account."
             exit 1
           fi
+          echo "::add-mask::$VAULT_SA_TOKEN"
+
+          echo "Enabling Kubernetes auth method..."
+          # Check if already enabled, otherwise enable it
+          AUTH_LIST_OUTPUT=$(oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
+            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault auth list -format=json")
+          if echo "$AUTH_LIST_OUTPUT" | jq -e '.["kubernetes/"]' > /dev/null; then
+            echo "Kubernetes auth method already enabled."
+          else
+            if ! oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
+              "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault auth enable kubernetes"; then
+              echo "::error::Failed to enable Kubernetes auth method."
+              exit 1
+            else
+              echo "Kubernetes auth method enabled successfully."
+            fi
+          fi
           
-          # This step will be implemented in a separate script in the future
-          echo "Vault authentication configuration will be implemented in a separate script."
-          echo "Vault configuration completed successfully."
+          echo "Writing Kubernetes auth config..."
+          # K8S_ISSUER should align with your cluster's service account issuer
+          # For OpenShift, it's typically like this, but verify for your specific version/config if issues arise.
+          K8S_ISSUER="https://kubernetes.default.svc.cluster.local"
+
+          oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
+            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault write auth/kubernetes/config \
+            token_reviewer_jwt='$VAULT_SA_TOKEN' \
+            kubernetes_host='https://kubernetes.default.svc' \
+            kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+            issuer='$K8S_ISSUER' \
+            disable_local_ca_jwt=false"
           
-          # Output current Vault status for verification
-          echo "Current Vault status:"
-          oc exec -n $NAMESPACE vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status"
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to write Kubernetes auth config to Vault."
+            echo "::group::vault-0 logs on K8s auth config failure"
+            oc logs -n "$NAMESPACE" vault-0 --tail=50 || echo "Failed to get vault-0 logs."
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "Creating example Kubernetes auth role 'my-app-role'..."
+          oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
+            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault write auth/kubernetes/role/my-app-role \
+            bound_service_account_names=my-app-sa \
+            bound_service_account_namespaces='$NAMESPACE' \
+            policies=default,my-app-policy \
+            ttl=24h"
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to create 'my-app-role' in Vault."
+            echo "::group::vault-0 logs on K8s role creation failure"
+            oc logs -n "$NAMESPACE" vault-0 --tail=50 || echo "Failed to get vault-0 logs."
+            echo "::endgroup::"
+            # Consider not exiting fatally here if an example role failing is not critical
+            # exit 1 
+            echo "::warning::Failed to create example 'my-app-role'. This might not be critical."
+          fi
+
+          echo "Kubernetes auth method configuration attempt completed."
       
       - name: Create Route for Vault UI
         if: ${{ github.event.inputs.ui_enabled == 'true' }}

@@ -48,7 +48,7 @@ check_vault_status() {
     
     while [ $(($(date +%s) - start_time)) -lt $timeout ]; do
         local status_output
-        status_output=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>&1)
+        status_output=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>&1)
         local exit_code=$?
         
         if [ $exit_code -eq 0 ]; then
@@ -116,7 +116,7 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
   echo "Manual unsealing process initiated..."
 
   echo "Checking initialization status of vault-0..."
-  VAULT_0_STATUS_OUTPUT_PRE_INIT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+  VAULT_0_STATUS_OUTPUT_PRE_INIT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
   VAULT_0_STATUS_EXIT_CODE_PRE_INIT=$?
 
   IS_INITIALIZED="false" 
@@ -156,7 +156,7 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
     echo "Initializing Vault on vault-0 (5 keys, 3 threshold)..."
     INIT_COMMAND_STDERR_FILE=$(mktemp)
     set +e 
-    INIT_OUTPUT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator init -key-shares=5 -key-threshold=3 -format=json" 2> "$INIT_COMMAND_STDERR_FILE")
+    INIT_OUTPUT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault operator init -key-shares=5 -key-threshold=3 -format=json" 2> "$INIT_COMMAND_STDERR_FILE")
     INIT_EXIT_CODE=$?
     set -e 
     INIT_STDERR_CONTENT=$(cat "$INIT_COMMAND_STDERR_FILE")
@@ -201,7 +201,7 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
     echo "Processing pod $pod_name for unsealing..."
     
     IS_POD_SEALED_FOR_UNSEAL_LOGIC="true" 
-    CURRENT_STATUS_OUTPUT_UNSEAL=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+    CURRENT_STATUS_OUTPUT_UNSEAL=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
     CURRENT_STATUS_EXIT_CODE_UNSEAL=$?
     echo "Debug: Pod $pod_name, vault status raw exit code (before unseal attempt): $CURRENT_STATUS_EXIT_CODE_UNSEAL"
 
@@ -226,7 +226,7 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
         echo "Unseal attempt $attempt for $pod_name..."
         for k_idx in 0 1 2; do # Apply first 3 keys
             if [ -n "${EFFECTIVE_UNSEAL_KEYS[$k_idx]}" ]; then
-                oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal ${EFFECTIVE_UNSEAL_KEYS[$k_idx]}" || echo "Warning: Command to apply key $k_idx failed for $pod_name attempt $attempt"
+                oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault operator unseal ${EFFECTIVE_UNSEAL_KEYS[$k_idx]}" || echo "Warning: Command to apply key $k_idx failed for $pod_name attempt $attempt"
                 sleep 1
             else
                 echo "::warning::Unseal key $k_idx is empty. Skipping for $pod_name."
@@ -234,7 +234,7 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
         done
         sleep 2
 
-        POST_UNSEAL_STATUS_JSON=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+        POST_UNSEAL_STATUS_JSON=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
         POST_UNSEAL_STATUS_EXIT_CODE=$?
         
         if [ $POST_UNSEAL_STATUS_EXIT_CODE -eq 0 ]; then
@@ -271,7 +271,7 @@ for pod_name in $(get_vault_pod_names); do
   for attempt in {1..3}; do 
     echo "Verification attempt $attempt for $pod_name..."
     set +e 
-    VAULT_STATUS_OUTPUT_VERIFY=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=http://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json")
+    VAULT_STATUS_OUTPUT_VERIFY=$(oc exec -n "$NAMESPACE" "$pod_name" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json")
     OC_EXEC_EXIT_CODE_VERIFY=$?
     set -e 
 

@@ -67,6 +67,42 @@ openshift-github-actions/
     └── validation/        # Cluster validation tests
 ```
 
+
+**Diagrammatic Representation (Mermaid):**
+```mermaid
+graph TD
+    subgraph OpenShift Cluster (4.18)
+        I[Cert-Manager] -- Manages --> J[TLS Certificate for Vault]
+        subgraph "vault Namespace"
+            K[Helm Release: vault] --> B[Vault StatefulSet]
+            B -- Manages --> C1[Vault Pod 1 (Active)]
+            B -- Manages --> C2[Vault Pod 2 (Standby)]
+            B -- Manages --> C3[Vault Pod 3 (Standby)]
+            C1 --> D[Persistent Volume via PVC]
+            C2 --> D
+            C3 --> D
+            C1 --> E[ConfigMap: vault-config]
+            C2 --> E
+            C3 --> E
+            F[Service Account: vault] -- Bound to --> vaultSCC[SCC: vault-scc]
+            C1 -- Uses --> F
+            C2 -- Uses --> F
+            C3 -- Uses --> F
+            J -- Mounted into --> C1
+            J -- Mounted into --> C2
+            J -- Mounted into --> C3
+            SVC[Service: vault (ClusterIP)] --> C1
+            SVC --> C2
+            SVC --> C3
+        end
+    end
+    G[OpenShift Route: vault (HTTPS - Passthrough)] --> SVC
+    User[User/Application] -- HTTPS --> G
+    C1 --> H[Vault UI/API over HTTPS]
+````
+
+
+
 ## Supported Cloud Providers
 
 ### Amazon Web Services (AWS)
