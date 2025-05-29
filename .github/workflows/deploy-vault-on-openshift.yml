@@ -303,13 +303,6 @@ jobs:
           echo "Waiting for Vault container to stabilize..."
           sleep 20
       
-      # Make Vault scripts executable
-      - name: Make Vault scripts executable
-        run: |
-          chmod +x ./scripts/common/wait_for_vault_pods.sh
-          chmod +x ./scripts/common/init_vault.sh
-          chmod +x ./scripts/common/verify_vault_status.sh
-      
       # Wait for Vault pods to be ready before proceeding with initialization
       - name: Wait for Vault pods to be ready
         id: wait_for_vault_pods
