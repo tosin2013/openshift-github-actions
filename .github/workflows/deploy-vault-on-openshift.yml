@@ -325,27 +325,54 @@ jobs:
         run: |
           NAMESPACE=${{ github.event.inputs.namespace }}
           
-          # Run the combined initialization and unseal script
-          # First, validate that we have at least 3 unseal keys
-          if [ -z "${{ secrets.VAULT_UNSEAL_KEY_0 }}" ] || [ -z "${{ secrets.VAULT_UNSEAL_KEY_1 }}" ] || [ -z "${{ secrets.VAULT_UNSEAL_KEY_2 }}" ]; then
-            echo "::error::At least 3 unseal keys (VAULT_UNSEAL_KEY_0, _1, _2) must be set in GitHub Secrets"
+          echo "Initializing Vault and generating unseal keys..."
+          
+          # Initialize Vault and capture the output
+          INIT_OUTPUT=$(oc exec -n $NAMESPACE vault-0 -- vault operator init -key-shares=5 -key-threshold=3 -format=json 2>&1)
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to initialize Vault: $INIT_OUTPUT"
             exit 1
           fi
           
-          # Pass all available unseal keys to the script
-          ./scripts/common/init_vault.sh "$NAMESPACE" \
-            "${{ secrets.VAULT_UNSEAL_KEY_0 }}" \
-            "${{ secrets.VAULT_UNSEAL_KEY_1 }}" \
-            "${{ secrets.VAULT_UNSEAL_KEY_2 }}" \
-            "${{ secrets.VAULT_UNSEAL_KEY_3 || '' }}" \
-            "${{ secrets.VAULT_UNSEAL_KEY_4 || '' }}"
+          # Parse the initialization output to get unseal keys and root token
+          UNSEAL_KEYS=($(echo "$INIT_OUTPUT" | jq -r '.unseal_keys_b64[]'))
+          ROOT_TOKEN=$(echo "$INIT_OUTPUT" | jq -r '.root_token')
           
-          # Capture the root token from the script output
-          ROOT_TOKEN=$(grep '^root_token=' $GITHUB_OUTPUT | cut -d'=' -f2-)
-          if [ -n "$ROOT_TOKEN" ]; then
-            echo "::add-mask::$ROOT_TOKEN"
-            echo "VAULT_ROOT_TOKEN=$ROOT_TOKEN" >> $GITHUB_ENV
+          if [ -z "$ROOT_TOKEN" ] || [ "${#UNSEAL_KEYS[@]}" -lt 3 ]; then
+            echo "::error::Failed to parse Vault initialization output"
+            exit 1
           fi
+          
+          # Mask the sensitive values
+          echo "::add-mask::$ROOT_TOKEN"
+          for i in "${!UNSEAL_KEYS[@]}"; do
+            echo "::add-mask::${UNSEAL_KEYS[$i]}"
+          done
+          
+          # Store the root token in GitHub environment
+          echo "VAULT_ROOT_TOKEN=$ROOT_TOKEN" >> $GITHUB_ENV
+          
+          # Unseal each Vault pod with the unseal keys
+          echo "Unsealing Vault pods..."
+          for POD in $(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=vault -o name); do
+            echo "Unsealing $POD..."
+            for KEY in "${UNSEAL_KEYS[@]:0:3}"; do  # Only need 3 keys to unseal
+              oc exec -n $NAMESPACE $POD -- vault operator unseal $KEY
+            done
+          done
+          
+          # Verify Vault is unsealed
+          echo "Verifying Vault status..."
+          oc exec -n $NAMESPACE vault-0 -- vault status
+          
+          # Output the root token and unseal keys (masked in logs)
+          echo "Vault initialization complete. Please securely store these values:"
+          echo "Root Token: $ROOT_TOKEN"
+          echo "Unseal Keys:"
+          for i in "${!UNSEAL_KEYS[@]}"; do
+            echo "Key $((i+1)): ${UNSEAL_KEYS[$i]}"
+          done
       
       # Verify Vault status after initialization/unsealing
       - name: Verify Vault status
