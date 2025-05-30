@@ -116,8 +116,17 @@ if [ "$AUTO_UNSEAL_ENABLED" == "false" ]; then
   echo "Manual unsealing process initiated..."
 
   echo "Checking initialization status of vault-0..."
-  VAULT_0_STATUS_OUTPUT_PRE_INIT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+  VAULT_0_STATUS_STDERR_FILE=$(mktemp)
+  set +e # Temporarily disable exit on error for this command
+  VAULT_0_STATUS_OUTPUT_PRE_INIT=$(oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2> "$VAULT_0_STATUS_STDERR_FILE")
   VAULT_0_STATUS_EXIT_CODE_PRE_INIT=$?
+  set -e # Re-enable exit on error
+  VAULT_0_STATUS_STDERR_CONTENT=$(cat "$VAULT_0_STATUS_STDERR_FILE")
+  rm "$VAULT_0_STATUS_STDERR_FILE"
+
+  echo "DEBUG: Initial 'vault status' on vault-0: Exit Code: $VAULT_0_STATUS_EXIT_CODE_PRE_INIT"
+  echo "DEBUG: Initial 'vault status' on vault-0: STDOUT: $VAULT_0_STATUS_OUTPUT_PRE_INIT"
+  echo "DEBUG: Initial 'vault status' on vault-0: STDERR: $VAULT_0_STATUS_STDERR_CONTENT"
 
   IS_INITIALIZED="false" 
 

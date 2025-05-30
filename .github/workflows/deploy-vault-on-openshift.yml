@@ -174,7 +174,7 @@ jobs:
           openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
             -keyout vault.key -out vault.crt \
             -subj "/CN=vault.$NAMESPACE.svc/O=Vault" \
-            -addext "subjectAltName = DNS:vault,DNS:vault.$NAMESPACE,DNS:vault.$NAMESPACE.svc,DNS:vault.$NAMESPACE.svc.cluster.local,DNS:localhost,DNS:vault.$APPS_DOMAIN"
+            -addext "subjectAltName = DNS:vault-${{ github.event.inputs.namespace }}.${APPS_DOMAIN},DNS:vault,DNS:vault.${{ github.event.inputs.namespace }},DNS:vault.${{ github.event.inputs.namespace }}.svc,DNS:vault.${{ github.event.inputs.namespace }}.svc.cluster.local,DNS:localhost,DNS:*.vault-internal,DNS:*.vault-internal.${{ github.event.inputs.namespace }}.svc.cluster.local"
 
           echo "Creating Kubernetes TLS secret 'vault-tls'..."
           oc create secret tls vault-tls \
@@ -225,106 +225,106 @@ jobs:
       - name: Generate Vault values file
         run: |
           echo "Generating Helm values file for Vault with OpenShift-specific configurations..."
-          
-          # Determine if auto-unsealing should be configured
+          NAMESPACE=${{ github.event.inputs.namespace }}
           AUTO_UNSEAL=${{ github.event.inputs.auto_unseal }}
           CLOUD_PROVIDER=${{ github.event.inputs.cloud_provider }}
-          
-          cat > vault-values.yaml <<EOF
-          global:
-            openshift: true
-            enabled: true
-          
-          server:
-            dev:
-              enabled: false # Ensure dev mode is explicitly disabled for HA
-            
-            # Configure integrated storage (Raft)
-            ha:
-              enabled: true
-              replicas: ${{ github.event.inputs.replicas }}
-              raft:
-                enabled: true
-                setNodeId: true
-                leaderElectionTimeout: "5s"
-                leaderLeaseTimeout: "5s"
-                retryJoin:
-                  enabled: true
-              # Inject HCL configuration for TLS listener and API/Cluster addresses
-              config: |
-                ui = true
-                
-                listener "tcp" {
-                  address = "0.0.0.0:8200"
-                  cluster_address = "0.0.0.0:8201"
-                  tls_cert_file = "/vault/userconfig/tls/tls.crt"
-                  tls_key_file  = "/vault/userconfig/tls/tls.key"
-                  # Enable TLS Client CA for mTLS if needed in the future
-                  # tls_client_ca_file = "/vault/userconfig/tls/client_ca.crt" 
-                }
+          REPLICAS=${{ github.event.inputs.replicas }}
 
-                storage "raft" {
-                  path = "/vault/data"
-                  node_id = "${HOSTNAME}" # Will be substituted by Vault
-                }
+          APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
+          echo "Using APPS_DOMAIN: $APPS_DOMAIN for Vault route."
 
-                # Set API and Cluster addresses to use HTTPS
-                api_addr = "https://0.0.0.0:8200" # Pod IP, will be NAT'd by service
-                # cluster_addr will be handled by Vault/Helm chart for HA communication
-            
-            # Mount the TLS secret
-            extraVolumes:
-              - type: secret
-                name: vault-tls # Name of the secret created earlier
-                path: /vault/userconfig/tls # Mount path for the secret
-            
-            # Updated Environment variables
-            extraEnvironmentVars:
-              VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
-              VAULT_SKIP_VERIFY: "true" # Keep for self-signed certs during internal comms if needed
-              VAULT_DISABLE_MLOCK: "true"
-              VAULT_LOG_LEVEL: "info"
-              VAULT_ADDR: "https://localhost:8200" # For CLI use within the pod
-              VAULT_API_ADDR: "https://0.0.0.0:8200" # For Vault to listen on all interfaces HTTPS
-            
-            readinessProbe:
-              enabled: false # Keep disabled as per previous lessons
-            
-            securityContext:
-              runAsNonRoot: true
-              runAsUser: 100 # Or the UID used by the Vault image
-              capabilities:
-                drop:
-                - ALL
-            
-            service:
-              type: ClusterIP
-            
-            dataStorage:
-              enabled: true
-              size: 10Gi
-              storageClass: ${{ github.event.inputs.storage_class }}
-            
-            ui:
-              enabled: ${{ github.event.inputs.ui_enabled }} # This is already in ha.config, but keep for chart's top-level UI toggle
-            
-            # Use the manually created ServiceAccount
-            serviceAccount:
-              create: false # We created it manually
-              name: vault # Name of the SA created earlier
-              # Annotations for SCC are no longer needed here as we bind it directly
-          
-          injector:
-            # Assuming injector also needs to use a specific SA if it's being modified,
-            # but the primary focus is the Vault server SA.
-            # If injector is used, its SA (vault-injector) also needs SCC binding.
-            serviceAccount:
-              create: true # Or false if 'vault-injector' SA is also manually created and configured
-              name: vault-injector # Default name, ensure it exists or is created with proper SCC
-              # annotations:
-              #   "openshift.io/scc": "vault-scc" # If this SA is used and needs the same SCC
-          EOF
-          
+          # Construct the HCL configuration string
+          HCL_CONFIG="ui = true\n"
+          HCL_CONFIG="${HCL_CONFIG}disable_mlock = true\n\n"
+          HCL_CONFIG="${HCL_CONFIG}listener \"tcp\" {\n"
+          HCL_CONFIG="${HCL_CONFIG}  address = \"0.0.0.0:8200\"\n"
+          HCL_CONFIG="${HCL_CONFIG}  cluster_address = \"0.0.0.0:8201\"\n"
+          HCL_CONFIG="${HCL_CONFIG}  tls_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
+          HCL_CONFIG="${HCL_CONFIG}  tls_key_file  = \"/vault/userconfig/vault-tls/tls.key\"\n"
+          HCL_CONFIG="${HCL_CONFIG}  tls_disable = false\n"
+          HCL_CONFIG="${HCL_CONFIG}}\n\n"
+          HCL_CONFIG="${HCL_CONFIG}storage \"raft\" {\n"
+          HCL_CONFIG="${HCL_CONFIG}  path = \"/vault/data\"\n"
+          HCL_CONFIG="${HCL_CONFIG}  node_id = env \"HOSTNAME\"\n"
+          # Add retry_join for HA robustness - loop for up to 'replicas' count
+          # This assumes vault-N.vault-internal service names are resolvable
+          for i in $(seq 0 $(($REPLICAS - 1))); do
+            HCL_CONFIG="${HCL_CONFIG}  retry_join {\n"
+            HCL_CONFIG="${HCL_CONFIG}    leader_api_addr = \"https://vault-${i}.vault-internal.${NAMESPACE}.svc:8200\"\n"
+            HCL_CONFIG="${HCL_CONFIG}    leader_ca_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
+            HCL_CONFIG="${HCL_CONFIG}    leader_client_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
+            HCL_CONFIG="${HCL_CONFIG}    leader_client_key_file = \"/vault/userconfig/vault-tls/tls.key\"\n"
+            HCL_CONFIG="${HCL_CONFIG}  }\n"
+          done
+          HCL_CONFIG="${HCL_CONFIG}}\n"
+
+          if [ "$AUTO_UNSEAL" == "true" ]; then
+            if [ "$CLOUD_PROVIDER" == "aws" ]; then
+              HCL_CONFIG="${HCL_CONFIG}\nseal \"awskms\" {\n"
+              HCL_CONFIG="${HCL_CONFIG}  region     = \"${{ secrets.AWS_REGION }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}  kms_key_id = \"${{ secrets.VAULT_AWS_KMS_KEY_ID }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}}\n"
+            elif [ "$CLOUD_PROVIDER" == "azure" ]; then
+              HCL_CONFIG="${HCL_CONFIG}\nseal \"azurekeyvault\" {\n"
+              HCL_CONFIG="${HCL_CONFIG}  tenant_id      = \"${{ secrets.AZURE_TENANT_ID }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}  client_id      = \"${{ secrets.AZURE_CLIENT_ID }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}  client_secret  = \"${{ secrets.AZURE_CLIENT_SECRET }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}  vault_name     = \"${{ secrets.AZURE_KEY_VAULT_NAME }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}  key_name       = \"${{ secrets.AZURE_KEY_VAULT_KEY_NAME }}\"\n"
+              HCL_CONFIG="${HCL_CONFIG}}\n"
+            else
+              echo "::warning::Auto-unseal is enabled but CLOUD_PROVIDER is not 'aws' or 'azure'. Seal configuration will be omitted."
+            fi
+          fi
+
+          # Use yq to build the values file
+          yq eval -n \
+            '.global.openshift = true | \
+             .global.tlsDisable = false | \
+             .server.ha.enabled = true | \
+             .server.ha.replicas = env(REPLICAS) | \
+             .server.ha.raft.enabled = true | \
+             .server.ha.raft.setNodeId = true | \
+             .server.route.enabled = true | \
+             .server.route.host = "vault-" + env(NAMESPACE) + "." + env(APPS_DOMAIN) | \
+             .server.route.path = "/" | \
+             .server.route.tls.termination = "passthrough" | \
+             .server.extraEnvironmentVars.VAULT_SKIP_VERIFY = "true" | \
+             .server.extraEnvironmentVars.VAULT_DISABLE_MLOCK = "true" | \
+             .server.extraEnvironmentVars.VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK = "true" | \
+             .server.extraEnvironmentVars.VAULT_LOG_LEVEL = "info" | \
+             .server.extraEnvironmentVars.VAULT_API_ADDR = "https://0.0.0.0:8200" | \
+             .server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = "https://$(HOSTNAME).vault-internal:8201" | \
+             .server.extraVolumes[0].type = "secret" | \
+             .server.extraVolumes[0].name = "vault-tls" | \
+             .server.extraVolumes[0].mountPath = "/vault/userconfig/vault-tls" | \
+             .server.readinessProbe.enabled = false | \
+             .server.livenessProbe.enabled = true | \
+             .server.livenessProbe.path = "/v1/sys/health?standbyok=true" | \
+             .server.livenessProbe.initialDelaySeconds = 60 | \
+             .server.dataStorage.enabled = true | \
+             .server.dataStorage.mountPath = "/vault/data" | \
+             .server.securityContext.runAsNonRoot = true | \
+             .server.securityContext.runAsUser = 1000 | \
+             .server.securityContext.runAsGroup = 1000 | \
+             .server.securityContext.fsGroup = 1000 | \
+             .server.securityContext.capabilities.drop[0] = "ALL" | \
+             .server.securityContext.capabilities.add[0] = "IPC_LOCK" | \
+             .injector.enabled = ${{ github.event.inputs.injector_enabled }} | \
+             .csi.enabled = ${{ github.event.inputs.csi_enabled }} | \
+             .ui.enabled = true | \
+             .ui.serviceType = "ClusterIP" ' \
+            > vault-values.yaml
+
+          # Inject the HCL configuration using yq
+          yq eval --inplace '.server.ha.config = env(HCL_CONFIG)' vault-values.yaml
+
+          echo "Generated vault-values.yaml:"
+          cat vault-values.yaml
+      
+      - name: Deploy Vault using Helm
+        run: |
+          echo "Deploying Vault using Helm..."
           # Deploy Vault using Helm with the values file
           helm upgrade --install vault hashicorp/vault \
             --namespace ${{ github.event.inputs.namespace }} \
