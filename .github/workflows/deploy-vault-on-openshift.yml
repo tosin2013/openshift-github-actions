@@ -294,7 +294,7 @@ jobs:
             ".server.extraEnvironmentVars.VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK = \"true\""
             ".server.extraEnvironmentVars.VAULT_LOG_LEVEL = \"info\""
             ".server.extraEnvironmentVars.VAULT_API_ADDR = \"https://0.0.0.0:8200\""
-            ".server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = \"https://$(HOSTNAME).vault-internal:8201\"" # $(HOSTNAME) is expanded by shell
+            ".server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = \"https://\${HOSTNAME}.vault-internal:8201\"" # ${HOSTNAME} is expanded by shell
             ".server.extraVolumes[0].type = \"secret\""
             ".server.extraVolumes[0].name = \"vault-tls\""
             ".server.extraVolumes[0].mountPath = \"/vault/userconfig/vault-tls\""
