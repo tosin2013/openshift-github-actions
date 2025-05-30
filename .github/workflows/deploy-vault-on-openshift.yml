@@ -278,48 +278,46 @@ jobs:
           fi
 
           # Use yq to build the values file
-          YQ_EXPRESSION_PART1=$(cat <<-EOF
-            .global.openshift = true |
-            .global.tlsDisable = false |
-            .server.ha.enabled = true |
-            .server.ha.replicas = env(REPLICAS) |
-            .server.ha.raft.enabled = true |
-            .server.ha.raft.setNodeId = true |
-            .server.route.enabled = true |
-            .server.route.host = "vault-" + env(NAMESPACE) + "." + env(APPS_DOMAIN) |
-            .server.route.path = "/" |
-            .server.route.tls.termination = "passthrough" |
-            .server.extraEnvironmentVars.VAULT_SKIP_VERIFY = "true" |
-            .server.extraEnvironmentVars.VAULT_DISABLE_MLOCK = "true" |
-            .server.extraEnvironmentVars.VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK = "true" |
-            .server.extraEnvironmentVars.VAULT_LOG_LEVEL = "info" |
-            .server.extraEnvironmentVars.VAULT_API_ADDR = "https://0.0.0.0:8200" |
-            .server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = "https://$(HOSTNAME).vault-internal:8201" |
-            .server.extraVolumes[0].type = "secret" |
-            .server.extraVolumes[0].name = "vault-tls" |
-            .server.extraVolumes[0].mountPath = "/vault/userconfig/vault-tls" |
-            .server.readinessProbe.enabled = false |
-            .server.livenessProbe.enabled = true |
-            .server.livenessProbe.path = "/v1/sys/health?standbyok=true" |
-            .server.livenessProbe.initialDelaySeconds = 60 |
-            .server.dataStorage.enabled = true |
-            .server.dataStorage.mountPath = "/vault/data" |
-            .server.securityContext.runAsNonRoot = true |
-            .server.securityContext.runAsUser = 1000 |
-            .server.securityContext.runAsGroup = 1000 |
-            .server.securityContext.fsGroup = 1000 |
-            .server.securityContext.capabilities.drop[0] = "ALL" |
-            .server.securityContext.capabilities.add[0] = "IPC_LOCK" |
-            .injector.enabled = ${{ github.event.inputs.injector_enabled }} |
-            .csi.enabled = ${{ github.event.inputs.csi_enabled }} |
-            .ui.enabled = ${{ github.event.inputs.ui_enabled }} |
-            .ui.serviceType = "ClusterIP"
-            EOF
+          YQ_EXPRESSION_PART1_LINES=(
+            ".global.openshift = true"
+            ".global.tlsDisable = false"
+            ".server.ha.enabled = true"
+            ".server.ha.replicas = env(REPLICAS)"
+            ".server.ha.raft.enabled = true"
+            ".server.ha.raft.setNodeId = true"
+            ".server.route.enabled = true"
+            ".server.route.host = \"vault-\" + env(NAMESPACE) + \".\" + env(APPS_DOMAIN)" # Escaped quotes for shell string
+            ".server.route.path = \"/\""
+            ".server.route.tls.termination = \"passthrough\""
+            ".server.extraEnvironmentVars.VAULT_SKIP_VERIFY = \"true\""
+            ".server.extraEnvironmentVars.VAULT_DISABLE_MLOCK = \"true\""
+            ".server.extraEnvironmentVars.VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK = \"true\""
+            ".server.extraEnvironmentVars.VAULT_LOG_LEVEL = \"info\""
+            ".server.extraEnvironmentVars.VAULT_API_ADDR = \"https://0.0.0.0:8200\""
+            ".server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = \"https://$(HOSTNAME).vault-internal:8201\"" # $(HOSTNAME) is expanded by shell
+            ".server.extraVolumes[0].type = \"secret\""
+            ".server.extraVolumes[0].name = \"vault-tls\""
+            ".server.extraVolumes[0].mountPath = \"/vault/userconfig/vault-tls\""
+            ".server.readinessProbe.enabled = false"
+            ".server.livenessProbe.enabled = true"
+            ".server.livenessProbe.path = \"/v1/sys/health?standbyok=true\""
+            ".server.livenessProbe.initialDelaySeconds = 60"
+            ".server.dataStorage.enabled = true"
+            ".server.dataStorage.mountPath = \"/vault/data\""
+            ".server.securityContext.runAsNonRoot = true"
+            ".server.securityContext.runAsUser = 1000"
+            ".server.securityContext.runAsGroup = 1000"
+            ".server.securityContext.fsGroup = 1000"
+            ".server.securityContext.capabilities.drop[0] = \"ALL\""
+            ".server.securityContext.capabilities.add[0] = \"IPC_LOCK\""
+            ".injector.enabled = ${{ github.event.inputs.injector_enabled }}"
+            ".csi.enabled = ${{ github.event.inputs.csi_enabled }}"
+            ".ui.enabled = ${{ github.event.inputs.ui_enabled }}"
+            ".ui.serviceType = \"ClusterIP\""
           )
-          # Remove trailing newline from YQ_EXPRESSION_PART1 if any, and ensure no leading/trailing spaces on lines
-          YQ_EXPRESSION_CLEANED=$(echo "$YQ_EXPRESSION_PART1" | sed 's/^[ \t]*//;s/[ \t]*$//' | tr '\n' ' ')
+          YQ_EXPRESSION_PART1=$(IFS=' | '; echo "${YQ_EXPRESSION_PART1_LINES[*]}")
 
-          yq eval -n "$YQ_EXPRESSION_CLEANED" > vault-values.yaml
+          yq eval -n "$YQ_EXPRESSION_PART1" > vault-values.yaml
 
           # Inject the HCL configuration using yq
           yq eval --inplace '.server.ha.config = env(HCL_CONFIG)' vault-values.yaml
