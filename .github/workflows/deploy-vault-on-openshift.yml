@@ -343,6 +343,9 @@ jobs:
       
       - name: Deploy Vault using Helm
         run: |
+          echo "Attempting to delete existing Vault ServiceAccount to prevent conflict..."
+          oc delete sa vault -n ${{ github.event.inputs.namespace }} --ignore-not-found=true
+
           echo "Deploying Vault using Helm..."
           # Deploy Vault using Helm with the values file
           helm upgrade --install vault hashicorp/vault \
