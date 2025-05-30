@@ -315,7 +315,8 @@ jobs:
             ".ui.enabled = ${{ github.event.inputs.ui_enabled }}"
             ".ui.serviceType = \"ClusterIP\""
           )
-          YQ_EXPRESSION_PART1=$(IFS=' | '; echo "${YQ_EXPRESSION_PART1_LINES[*]}")
+          TEMP_EXPR=$(printf " | %s" "${YQ_EXPRESSION_PART1_LINES[@]}")
+          YQ_EXPRESSION_PART1=${TEMP_EXPR# | } # Remove leading " | "
 
           yq eval -n "$YQ_EXPRESSION_PART1" > vault-values.yaml
 
