@@ -240,7 +240,11 @@ jobs:
           CLOUD_PROVIDER=${{ github.event.inputs.cloud_provider }}
           REPLICAS=${{ github.event.inputs.replicas }}
 
+          export NAMESPACE
+          export REPLICAS
+
           APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
+          export APPS_DOMAIN
           echo "Using APPS_DOMAIN: $APPS_DOMAIN for Vault route."
 
           # Construct the HCL configuration string
@@ -331,6 +335,7 @@ jobs:
           yq eval -n "$YQ_EXPRESSION_PART1" > vault-values.yaml
 
           # Inject the HCL configuration using yq
+          export HCL_CONFIG
           yq eval --inplace '.server.ha.config = env(HCL_CONFIG)' vault-values.yaml
 
           echo "Generated vault-values.yaml:"
