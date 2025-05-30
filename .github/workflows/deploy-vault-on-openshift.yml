@@ -40,6 +40,16 @@ on:
         required: false
         default: 'none'
         type: string
+      injector_enabled:
+        description: 'Enable Vault Agent Injector'
+        required: false
+        default: false
+        type: boolean
+      csi_enabled:
+        description: 'Enable Vault CSI Provider'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy-vault:
@@ -229,10 +239,6 @@ jobs:
           AUTO_UNSEAL=${{ github.event.inputs.auto_unseal }}
           CLOUD_PROVIDER=${{ github.event.inputs.cloud_provider }}
           REPLICAS=${{ github.event.inputs.replicas }}
-
-          echo "DEBUG: github.event.inputs.injector_enabled = '${{ github.event.inputs.injector_enabled }}'"
-          echo "DEBUG: github.event.inputs.csi_enabled = '${{ github.event.inputs.csi_enabled }}'"
-          echo "DEBUG: github.event.inputs.ui_enabled = '${{ github.event.inputs.ui_enabled }}'"
 
           APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
           echo "Using APPS_DOMAIN: $APPS_DOMAIN for Vault route."
