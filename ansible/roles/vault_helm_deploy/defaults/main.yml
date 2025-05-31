@@ -21,6 +21,7 @@ vault_pvc_size: "10Gi"
 vault_audit_storage_enabled: false
 vault_audit_pvc_size: "10Gi"
 vault_storage_class: "" # Set if a specific storage class is required, otherwise uses default
+_vault_helm_data_storage_class: ""
 
 # Auto-unseal settings (defaults to manual unseal)
 vault_auto_unseal_enabled: false

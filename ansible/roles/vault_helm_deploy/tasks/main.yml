@@ -12,7 +12,7 @@
 
 - name: Generate Helm values file from template
   ansible.builtin.template:
-    src: vault-values.yaml.j2
+    src: vault-helm-values.yaml.j2
     dest: "/tmp/vault-helm-values.yaml"
     mode: '0644'
   # Variables for the template are taken from defaults and playbook vars
@@ -34,8 +34,8 @@
     - helm
     - vault_deploy
 
-- name: Remove temporary generated Helm values file
-  ansible.builtin.file:
-    path: "/tmp/vault-helm-values.yaml"
-    state: absent
-  when: true # Always attempt to remove the fixed path file
+# - name: Remove temporary Vault Helm values file
+#   ansible.builtin.file:
+#     path: "/tmp/vault-helm-values.yaml"
+#     state: absent
+#   when: true # Always attempt to remove the fixed path file

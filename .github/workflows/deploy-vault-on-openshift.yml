@@ -16,10 +16,11 @@ on:
         required: true
         default: 'vault'
         type: string
-      storage_class:
-        description: 'Storage class for Vault persistent volume'
-        required: true
+      helm_storage_class:
+        description: 'Optional: StorageClass to use for Vault data persistence. If empty, relies on Helm chart defaults or cluster default.'
+        required: false
         type: string
+        default: ''
       replicas:
         description: 'Number of Vault replicas'
         required: true
@@ -97,6 +98,7 @@ jobs:
           INPUT_AUTO_UNSEAL: ${{ github.event.inputs.auto_unseal }}
           INPUT_AWS_REGION: ${{ github.event.inputs.aws_region }}
           INPUT_HELM_TLS_ENABLED: ${{ github.event.inputs.helm_tls_enabled }}
+          INPUT_HELM_STORAGE_CLASS: ${{ github.event.inputs.helm_storage_class }}
 
           SECRET_OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
           SECRET_OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
