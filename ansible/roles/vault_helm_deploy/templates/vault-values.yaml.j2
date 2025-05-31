@@ -1,0 +1,228 @@
+global:
+  openshift: true
+  tlsDisable: false # We manage TLS via secrets and passthrough route
+
+server:
+  enabled: true # Explicitly enable the server component
+  image:
+    repository: "{{ vault_helm_image_repository }}"
+    tag: "{{ vault_image_tag }}"
+    pullPolicy: "{{ vault_helm_image_pull_policy }}"
+
+  # Pod-level security context
+  # Defines privilege and access control settings for a Pod.
+  # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+  # Attempting to guide SCC selection by requesting specific UIDs/GIDs
+  # that vault-scc allows (via RunAsAny) but restricted-v2 might not.
+  annotations: # For Pods created by the StatefulSet
+    openshift.io/scc: "{{ vault_scc_name | default('vault-scc') }}"
+    # For OpenShift SCCs, ref: https://docs.openshift.com/container-platform/4.16/authentication/managing-security-context-constraints.html
+    # For Vault Helm chart on OpenShift, ref: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/helm/openshift
+
+  statefulSet:
+    annotations: {} # For the StatefulSet object itself, if needed
+    securityContext: # For Pods created by the StatefulSet
+      pod:
+        runAsUser: 100      # Vault user ID
+        runAsGroup: 1000    # Vault group ID
+        fsGroup: 1000       # FSGroup for /vault/data permissions
+
+
+
+  service:
+    enabled: true
+    type: ClusterIP
+    # For OpenShift, service names often don't need clusterIP: None for headless
+    # but vault-internal is the headless one, 'vault' service is ClusterIP
+
+  # Disable readiness and liveness probes for easier initial deployment and testing
+  readinessProbe:
+    enabled: false
+  livenessProbe:
+    enabled: false
+
+  extraConfig: ""
+
+  autoUnseal:
+    enabled: {{ (vault_auto_unseal_enabled | string | lower == 'true') | lower }}
+
+  extraEnvironmentVars:
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_DISABLE_MLOCK: "true"
+    VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
+    VAULT_API_ADDR: "https://0.0.0.0:8200"
+    VAULT_CLUSTER_ADDR: "https://$(HOSTNAME).vault-internal:8201"
+    # Add cloud KMS specific env vars if auto-unseal is enabled
+{% if vault_auto_unseal_enabled %}
+{% if vault_auto_unseal_cloud_provider == 'aws' %}
+    VAULT_AWS_KMS_KEY_ID: "{{ vault_aws_kms_key_id | default('') }}"
+    AWS_REGION: "{{ vault_aws_region | default('') }}"
+{% elif vault_auto_unseal_cloud_provider == 'azure' %}
+    VAULT_AZURE_KEY_VAULT_NAME: "{{ vault_azure_key_vault_name | default('') }}"
+    VAULT_AZURE_KEY_NAME: "{{ vault_azure_key_vault_key_name | default('') }}"
+    AZURE_TENANT_ID: "{{ vault_azure_tenant_id | default('') }}"
+    AZURE_CLIENT_ID: "{{ vault_azure_client_id | default('') }}"
+    AZURE_CLIENT_SECRET: "{{ vault_azure_client_secret | default('') }}"
+{% elif vault_auto_unseal_cloud_provider == 'gcp' %}
+    VAULT_GCP_KMS_KEY_RING: "{{ vault_gcp_kms_key_ring | default('') }}"
+    VAULT_GCP_KMS_CRYPTO_KEY: "{{ vault_gcp_kms_crypto_key | default('') }}"
+    VAULT_GCP_KMS_PROJECT: "{{ vault_gcp_kms_project | default('') }}"
+    VAULT_GCP_KMS_LOCATION: "{{ vault_gcp_kms_location | default('') }}"
+    GOOGLE_APPLICATION_CREDENTIALS: "{{ vault_gcp_sa_credentials_path | default('/vault/userconfig/gcp-kms/gcp-credentials.json') }}"
+{% endif %}
+{% endif %}
+
+  standalone:
+    # Configuration for a single Vault instance (non-HA).
+    # General Vault Helm chart config: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/helm
+    enabled: {{ (vault_ha_enabled | string | lower == 'false') | lower }}
+{% if vault_ha_enabled | string | lower == 'false' %}
+    config: |
+      ui = {{ vault_ui_enabled | lower }}
+      
+      listener "tcp" {
+        address = "0.0.0.0:8200"
+        cluster_address = "0.0.0.0:8201"
+        tls_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+        tls_key_file  = "/vault/userconfig/vault-tls/tls.key"
+        tls_disable = false
+      }
+
+      # Raft is Vault's integrated storage solution.
+      # Ref: https://developer.hashicorp.com/vault/docs/configuration/storage/raft
+      storage "raft" {
+        path = "/vault/data"
+      }
+{% if vault_auto_unseal_enabled %}
+      seal "{{ vault_auto_unseal_cloud_provider }}" {
+{% if vault_auto_unseal_cloud_provider == 'aws' %}
+        kms_key_id = "{{ vault_aws_kms_key_id }}"
+        region     = "{{ vault_aws_region }}"
+{% elif vault_auto_unseal_cloud_provider == 'azure' %}
+        tenant_id      = "{{ vault_azure_tenant_id }}"
+        client_id      = "{{ vault_azure_client_id }}"
+        client_secret  = "{{ vault_azure_client_secret }}"
+        key_vault_name = "{{ vault_azure_key_vault_name }}"
+        key_name       = "{{ vault_azure_key_vault_key_name }}"
+{% elif vault_auto_unseal_cloud_provider == 'gcp' %}
+        project     = "{{ vault_gcp_kms_project }}"
+        region      = "{{ vault_gcp_kms_location }}"
+        key_ring    = "{{ vault_gcp_kms_key_ring }}"
+        crypto_key  = "{{ vault_gcp_kms_crypto_key }}"
+        credentials = "{{ vault_gcp_sa_credentials_path | default('/vault/userconfig/gcp-kms/gcp-credentials.json') }}"
+{% endif %}
+      }
+{% endif %}
+{% endif %}
+
+  ha:
+    enabled: {{ (vault_ha_enabled | string | lower == 'true') | lower }}
+    replicas: {{ vault_replicas if (vault_ha_enabled | string | lower == 'true') else 1 }}
+{% if vault_ha_enabled | string | lower == 'true' %}
+    config: |
+{% else %}
+    config: "" # Explicitly empty HA config when HA is not enabled
+{% endif %}
+{% if vault_ha_enabled | string | lower == 'true' %}
+      ui = {{ vault_ui_enabled | lower }}
+      
+      listener "tcp" {
+        address = "0.0.0.0:8200"
+        cluster_address = "0.0.0.0:8201"
+        tls_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+        tls_key_file  = "/vault/userconfig/vault-tls/tls.key"
+        tls_client_ca_file = "/vault/userconfig/vault-tls/ca.crt" # Assuming ca.crt is part of the secret
+        tls_disable = false
+      }
+
+      # Raft is Vault's integrated storage solution.
+      # Ref: https://developer.hashicorp.com/vault/docs/configuration/storage/raft
+      storage "raft" {
+        path = "/vault/data"
+        retry_join {
+          leader_api_addr = "http://vault-0.vault-internal:8200"
+          leader_ca_cert_file = "/vault/userconfig/vault-tls/ca.crt"
+          leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+          leader_client_key_file = "/vault/userconfig/vault-tls/tls.key"
+        }
+        # node_id configuration will be handled by StatefulSet pod names
+      }
+{% if vault_auto_unseal_enabled | string | lower == 'true' %}
+      seal "{{ vault_auto_unseal_cloud_provider }}" {
+{% if vault_auto_unseal_cloud_provider == 'aws' %}
+        kms_key_id = "{{ vault_aws_kms_key_id }}"
+        region     = "{{ vault_aws_region }}"
+{% elif vault_auto_unseal_cloud_provider == 'azure' %}
+        tenant_id      = "{{ vault_azure_tenant_id }}"
+        client_id      = "{{ vault_azure_client_id }}"
+        client_secret  = "{{ vault_azure_client_secret }}"
+        key_vault_name = "{{ vault_azure_key_vault_name }}"
+        key_name       = "{{ vault_azure_key_vault_key_name }}"
+{% elif vault_auto_unseal_cloud_provider == 'gcp' %}
+        project     = "{{ vault_gcp_kms_project }}"
+        region      = "{{ vault_gcp_kms_location }}"
+        key_ring    = "{{ vault_gcp_kms_key_ring }}"
+        crypto_key  = "{{ vault_gcp_kms_crypto_key }}"
+        credentials = "{{ vault_gcp_sa_credentials_path | default('/vault/userconfig/gcp-kms/gcp-credentials.json') }}"
+{% endif %}
+      }
+{% endif %}
+    # Disable readiness/liveness probes or make them less strict for HA during startup
+    # readinessProbe:
+    #   enabled: false # Example: disable during initial setup
+    # livenessProbe:
+    #   enabled: false # Example: disable during initial setup
+{% endif %}
+
+  route:
+    enabled: {{ vault_route_enabled | lower }}
+{% if vault_route_enabled %}
+    host: "{% if openshift_apps_domain_discovered is defined and openshift_apps_domain_discovered != '' %}{{ vault_common_name_prefix }}.{{ vault_namespace }}.{{ openshift_apps_domain_discovered }}{% else %}{{ '' }}{% endif %}" # Leave empty for OpenShift to auto-generate if desired
+    path: "/"
+    tls:
+      termination: passthrough
+{% endif %}
+
+  extraVolumes:
+    - type: secret
+      name: vault-tls # Name of the Secret object for TLS certs created by openshift_prereqs
+      mountPath: "/vault/userconfig/tls/vault-tls"
+{% if vault_auto_unseal_enabled and vault_auto_unseal_cloud_provider == 'gcp' and vault_gcp_sa_credentials_secret_name %}
+    - type: secret
+      name: "{{ vault_gcp_sa_credentials_secret_name }}" # Name of the Secret for GCP SA creds
+      mountPath: "{{ vault_gcp_sa_credentials_path | default('/vault/userconfig/gcp-kms') | regex_replace('/[^/]+$', '') }}" # Mount the directory
+{% endif %}
+
+  dataStorage:
+    enabled: true
+    size: "{{ vault_pvc_size }}"
+{% if vault_storage_class is defined and vault_storage_class != "" %}
+    storageClass: "{{ vault_storage_class }}"
+{% endif %}
+    # accessMode: ReadWriteOnce # Default for StatefulSet PVCs
+
+  auditStorage:
+    enabled: {{ vault_audit_storage_enabled | lower }}
+{% if vault_audit_storage_enabled %}
+    size: "{{ vault_audit_pvc_size }}"
+{% if vault_storage_class is defined and vault_storage_class != "" %}
+    storageClass: "{{ vault_storage_class }}"
+{% endif %}
+{% endif %}
+
+  # Service Account for Vault pods
+  serviceAccount:
+    create: false # We create it in openshift_prereqs role
+    name: "vault"
+
+csi:
+  enabled: {{ vault_csi_enabled | lower }}
+
+injector:
+  enabled: {{ vault_injector_enabled | lower }}
+{% if vault_injector_enabled %}
+  # Ensure injector also uses the vault-scc or has appropriate permissions
+  # This might require setting securityContext for the injector pod if it's restricted
+  # agentInjector.securityContext.runAsUser, fsGroup etc.
+  # For OpenShift, you might need to allow the injector's SA to use the vault-scc or a similar one.
+{% endif %}

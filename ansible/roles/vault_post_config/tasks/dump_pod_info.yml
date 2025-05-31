@@ -1,0 +1,49 @@
+---
+# tasks file for dumping pod info on failure (used as error hook)
+
+- name: "Gathering debug info for pod {{ _target_pod_name | default('N/A') }} in namespace {{ _target_pod_namespace | default('N/A') }}"
+  ansible.builtin.debug:
+    msg: "A task related to pod '{{ _target_pod_name | default('N/A') }}' failed. Dumping details."
+  when: _target_pod_name is defined and _target_pod_namespace is defined
+
+- name: "Get pod description for {{ _target_pod_name | default('N/A') }}"
+  ansible.builtin.command:
+    cmd: "{{ _vault_post_config_oc_executable }} describe pod {{ _target_pod_name }} -n {{ _target_pod_namespace }}"
+  register: pod_describe_output
+  changed_when: false
+  ignore_errors: true
+  when: _target_pod_name is defined and _target_pod_namespace is defined
+
+- name: "Display pod description for {{ _target_pod_name | default('N/A') }}"
+  ansible.builtin.debug:
+    var: pod_describe_output.stdout_lines
+  ignore_errors: true
+  when: pod_describe_output is defined and pod_describe_output.stdout_lines is defined
+
+- name: "Get pod logs for {{ _target_pod_name | default('N/A') }} (container: {{ _vault_post_config_container_name }})"
+  ansible.builtin.command:
+    cmd: "{{ _vault_post_config_oc_executable }} logs {{ _target_pod_name }} -n {{ _target_pod_namespace }} -c {{ _vault_post_config_container_name }} --tail=100"
+  register: pod_logs_output
+  changed_when: false
+  ignore_errors: true
+  when: _target_pod_name is defined and _target_pod_namespace is defined
+
+- name: "Display pod logs for {{ _target_pod_name | default('N/A') }}"
+  ansible.builtin.debug:
+    var: pod_logs_output.stdout_lines
+  ignore_errors: true
+  when: pod_logs_output is defined and pod_logs_output.stdout_lines is defined
+
+- name: "Get events in namespace {{ _target_pod_namespace | default('N/A') }}"
+  ansible.builtin.command:
+    cmd: "{{ _vault_post_config_oc_executable }} get events -n {{ _target_pod_namespace }} --sort-by=.metadata.creationTimestamp"
+  register: namespace_events
+  changed_when: false
+  ignore_errors: true
+  when: _target_pod_namespace is defined
+
+- name: "Display recent events in namespace {{ _target_pod_namespace | default('N/A') }}"
+  ansible.builtin.debug:
+    var: namespace_events.stdout_lines[-20:] # Display last 20 events
+  ignore_errors: true
+  when: namespace_events is defined and namespace_events.stdout_lines is defined

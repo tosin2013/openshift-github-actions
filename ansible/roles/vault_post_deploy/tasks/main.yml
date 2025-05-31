@@ -1,0 +1,347 @@
+---
+# tasks file for vault_post_deploy
+
+- name: Ensure Vault namespace is set
+  ansible.builtin.fail:
+    msg: "Variable 'vault_namespace' is not defined. It is required for post-deployment tasks."
+  when: vault_namespace is not defined or vault_namespace == ""
+
+- name: Wait for Vault pods to be running and ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ vault_namespace }}"
+    label_selectors:
+      - "{{ vault_post_deploy_pod_label_selector }}"
+  register: vault_pods_status
+  retries: "{{ vault_post_deploy_pod_ready_retries }}"
+  delay: "{{ vault_post_deploy_pod_ready_delay }}"
+  until: >-
+    vault_pods_status.resources is defined and
+    (vault_pods_status.resources | length) >= (vault_replicas | default(1 if vault_deployment_mode == 'standalone' else 3)) and
+    (vault_pods_status.resources | map(attribute='status.phase') | unique == ['Running']) and
+    (vault_pods_status.resources | selectattr('status.containerStatuses', 'defined') 
+                                 | map(attribute='status.containerStatuses') 
+                                 | flatten 
+                                 | selectattr('ready', 'equalto', true) 
+                                 | list | length) == (vault_replicas | default(1 if vault_deployment_mode == 'standalone' else 3))
+  changed_when: false
+  vars:
+    _default_replicas: "{{ 1 if vault_deployment_mode == 'standalone' else (vault_replicas_default | default(3)) }}"
+    vault_replicas: "{{ playbook_vault_replicas | default(_default_replicas) }}"
+  # Note: vault_replicas_default and playbook_vault_replicas would need to be set appropriately
+  # For now, relying on vault_replicas being passed or the direct default in the until condition.
+
+- name: Get list of Vault pod names
+  ansible.builtin.set_fact:
+    vault_pod_names: "{{ vault_pods_status.resources | map(attribute='metadata.name') | sort | list }}"
+  when: vault_pods_status.resources is defined
+
+- name: Set init pod name based on sorted list or default
+  ansible.builtin.set_fact:
+    _init_pod_to_use: "{{ (vault_pod_names | first) if (vault_pod_names is defined and vault_pod_names | length > 0) else vault_post_deploy_init_pod }}"
+
+- name: Debug Vault pod names and designated init pod
+  ansible.builtin.debug:
+    msg:
+      - "Found Vault pods: {{ vault_pod_names | default([]) }}"
+      - "Designated init pod: {{ _init_pod_to_use }}"
+  when: vault_pod_names is defined
+
+- name: Check if Vault is initialized (on the designated init pod)
+  ansible.builtin.command: >
+    oc exec -n {{ vault_namespace }} {{ _init_pod_to_use }} --
+    sh -c "vault status -format=json -tls-skip-verify"
+  register: vault_init_status_check
+  changed_when: false
+  failed_when: false # We will check the output json
+  when: _init_pod_to_use != ""
+
+- name: Parse initialization status
+  ansible.builtin.set_fact:
+    vault_is_initialized: "{{ (vault_init_status_check.stdout | from_json).initialized | default(false) if vault_init_status_check.rc == 0 and vault_init_status_check.stdout != '' else false }}"
+    vault_is_sealed: "{{ (vault_init_status_check.stdout | from_json).sealed | default(true) if vault_init_status_check.rc == 0 and vault_init_status_check.stdout != '' else true }}"
+  when: vault_init_status_check is defined and vault_init_status_check.rc == 0
+
+- name: Display Vault initialization status
+  ansible.builtin.debug:
+    msg: "Vault Initialized: {{ vault_is_initialized | default('Unknown (check failed or pod not found)') }}, Sealed: {{ vault_is_sealed | default('Unknown (check failed or pod not found)') }}"
+
+# Block for initializing Vault and setting credentials as facts
+- name: Initialize Vault if not already initialized
+  block:
+    - name: Initialize Vault operator init command
+      ansible.builtin.command: >
+        oc exec -n {{ vault_namespace }} {{ _init_pod_to_use }} --
+        sh -c "vault operator init \
+        -key-shares={{ vault_post_deploy_unseal_keys_shares }} \
+        -key-threshold={{ vault_post_deploy_unseal_keys_threshold }} \
+        -format=json -tls-skip-verify"
+      register: vault_init_output
+      changed_when: true # Initialization is a change
+
+    - name: Parse initialization output
+      ansible.builtin.set_fact:
+        vault_unseal_keys_parsed: "{{ (vault_init_output.stdout | from_json).unseal_keys_b64 }}"
+        vault_root_token_parsed: "{{ (vault_init_output.stdout | from_json).root_token }}"
+        vault_is_initialized_after_init: true
+        vault_is_sealed_after_init: true # Vault is sealed immediately after init
+      when:
+        - vault_init_output is defined
+        - vault_init_output.rc == 0
+        - vault_init_output.stdout != ""
+
+    - name: Display initialization results
+      ansible.builtin.debug:
+        msg:
+          - "Vault initialization complete."
+          - "Root Token: {{ vault_root_token_parsed }}"
+          - "Unseal Keys: {{ vault_unseal_keys_parsed }}"
+      when: vault_root_token_parsed is defined
+
+    # Update overall status facts after successful initialization attempt
+    - name: Update overall status facts post-initialization
+      ansible.builtin.set_fact:
+        vault_is_initialized: "{{ vault_is_initialized_after_init | default(vault_is_initialized) }}"
+        vault_is_sealed: "{{ vault_is_sealed_after_init | default(vault_is_sealed) }}"
+        vault_unseal_keys: "{{ vault_unseal_keys_parsed | default(omit) }}"
+        vault_root_token: "{{ vault_root_token_parsed | default(omit) }}"
+      when: vault_is_initialized_after_init is defined
+
+  when: not vault_is_initialized | bool
+
+# Manage Kubernetes secrets for unseal keys and root token
+- name: Manage Vault credentials in Kubernetes secrets
+  block:
+    - name: Prepare secret data for unseal keys and root token
+      ansible.builtin.set_fact:
+        vault_secret_data_map:
+          root_token: "{{ vault_root_token | b64encode }}"
+          {% for i in range(vault_unseal_keys | length) %}
+          unseal_key_{{ i }}: "{{ vault_unseal_keys[i] | b64encode }}"
+          {% endfor %}
+      when: vault_root_token is defined and vault_unseal_keys is defined and vault_unseal_keys | length > 0
+
+    - name: Create/Update Kubernetes secret for Vault credentials
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ vault_init_secrets_name_prefix }}"
+            namespace: "{{ vault_namespace }}"
+            labels:
+              app.kubernetes.io/name: vault
+              app.kubernetes.io/component: credentials
+          type: "{{ vault_init_secrets_type }}"
+          data: "{{ vault_secret_data_map }}"
+      when: vault_secret_data_map is defined
+
+  when: vault_manage_init_secrets | bool and vault_root_token is defined and vault_unseal_keys is defined
+
+- name: Retrieve Vault credentials from Kubernetes secret if not in facts
+  block:
+    - name: Get Vault credentials secret from Kubernetes
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ vault_init_secrets_name_prefix }}"
+        namespace: "{{ vault_namespace }}"
+      register: vault_credentials_secret_info
+
+    - name: Extract unseal keys and root token from secret if found
+      ansible.builtin.set_fact:
+        vault_root_token_from_secret: "{{ (vault_credentials_secret_info.resources[0].data.root_token | b64decode) if vault_credentials_secret_info.resources and 'root_token' in vault_credentials_secret_info.resources[0].data else omit }}"
+        vault_unseal_keys_from_secret: |
+          {% set keys = [] %}
+          {% if vault_credentials_secret_info.resources and vault_credentials_secret_info.resources[0].data is defined %}
+            {% for i in range(vault_post_deploy_unseal_keys_shares) %}
+              {% if ('unseal_key_' + i|string) in vault_credentials_secret_info.resources[0].data %}
+                {% set _ = keys.append(vault_credentials_secret_info.resources[0].data['unseal_key_' + i|string] | b64decode) %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ keys if keys else omit }}
+      when: vault_credentials_secret_info.resources | default([]) | length > 0
+
+    - name: Set unseal keys and root token from secret if not already set from init
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ vault_root_token_from_secret }}"
+        vault_unseal_keys: "{{ vault_unseal_keys_from_secret }}"
+      when:
+        - vault_root_token_from_secret is defined
+        - vault_unseal_keys_from_secret is defined
+        - vault_root_token is not defined or vault_unseal_keys is not defined
+
+    - name: Debug retrieved credentials
+      ansible.builtin.debug:
+        msg:
+          - "Vault Root Token (after secret check): {{ vault_root_token | default('Not set') }}"
+          - "Vault Unseal Keys (after secret check count): {{ (vault_unseal_keys | default([])) | length }}"
+      when: vault_root_token_from_secret is defined or vault_unseal_keys_from_secret is defined
+
+  when:
+    - vault_manage_init_secrets | bool
+    - vault_is_initialized | bool # Only try to retrieve if Vault is initialized
+    - vault_unseal_keys is not defined or vault_root_token is not defined # And we don't have them in facts yet
+
+# --- Unsealing tasks ---
+- name: Unseal Vault pods if manual unseal is configured and Vault is sealed
+  block:
+    - name: Determine current Vault leader pod (for targeted operations)
+      ansible.builtin.include_tasks: get_vault_leader_pod.yml
+      when: vault_leader_pod_name is not defined or vault_leader_pod_name == ""
+
+    - name: Get all Vault pod names
+      ansible.builtin.include_tasks: get_vault_pod_names.yml
+      when: (vault_pod_names is not defined or vault_pod_names | length == 0) and (vault_leader_pod_name is defined and vault_leader_pod_name != "")
+
+    - name: Check initial seal status using the leader pod
+      ansible.builtin.command: >
+        oc exec -n {{ vault_namespace }} {{ vault_leader_pod_name }} --
+        sh -c "vault status -format=json -tls-skip-verify"
+      register: initial_vault_seal_status_leader
+      changed_when: false
+      failed_when: false # Don't fail if command fails, just check output
+      when: vault_leader_pod_name is defined and vault_leader_pod_name != ""
+
+    - name: Set fact for initial seal status based on leader
+      ansible.builtin.set_fact:
+        vault_is_sealed: "{{ (initial_vault_seal_status_leader.stdout | from_json).sealed | default(true) if initial_vault_seal_status_leader.stdout is defined and initial_vault_seal_status_leader.stdout != '' else true }}"
+      when: initial_vault_seal_status_leader.stdout is defined
+
+    - name: Loop through each Vault pod to unseal
+      ansible.builtin.include_tasks: unseal_pod.yml
+      loop: "{{ vault_pod_names | default([]) }}"
+      loop_control:
+        loop_var: current_vault_pod_name
+      when:
+        - vault_pod_names is defined
+        - vault_pod_names | length > 0
+        - vault_is_sealed | bool # Only if determined to be sealed
+        - vault_unseal_keys is defined
+        - vault_unseal_keys | length >= (vault_post_deploy_unseal_keys_threshold | int)
+
+    - name: Verify final seal status of all pods
+      ansible.builtin.command: >
+        oc exec -n {{ vault_namespace }} {{ item }} --
+        sh -c "vault status -format=json -tls-skip-verify"
+      register: final_vault_seal_status_check
+      loop: "{{ vault_pod_names | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - vault_pod_names is defined
+        - vault_pod_names | length > 0
+
+    - name: Display final seal status
+      ansible.builtin.debug:
+        msg: "Pod {{ item.item }} - Initialized: {{ (item.stdout | from_json).initialized | default('N/A') }}, Sealed: {{ (item.stdout | from_json).sealed | default('N/A') }}"
+      loop: "{{ final_vault_seal_status_check.results | default([]) }}"
+      when: final_vault_seal_status_check.results is defined
+
+  when:
+    - not vault_auto_unseal_enabled | bool
+    - vault_is_initialized | bool
+    - vault_unseal_keys is defined
+    - vault_unseal_keys | length >= (vault_post_deploy_unseal_keys_threshold | int)
+  tags:
+    - vault_unseal
+
+- name: Message if auto-unseal is enabled
+  ansible.builtin.debug:
+    msg: "Vault auto-unseal is enabled. Manual unsealing steps are skipped."
+  when: vault_auto_unseal_enabled | bool
+
+# --- Configure Kubernetes Auth Method ---
+- name: Configure Kubernetes authentication method in Vault
+  block:
+    - name: Get the ServiceAccount token secret for Kubernetes auth
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ vault_k8s_auth_sa_token_secret_name }}"
+        namespace: "{{ vault_namespace }}"
+      register: vault_sa_token_secret_info
+      retries: 5
+      delay: 5
+      until: vault_sa_token_secret_info.resources | default([]) | length > 0 and 'token' in vault_sa_token_secret_info.resources[0].data and 'ca.crt' in vault_sa_token_secret_info.resources[0].data
+
+    - name: Extract SA token (JWT) and CA cert from secret
+      ansible.builtin.set_fact:
+        _vault_k8s_sa_token_jwt: "{{ (vault_sa_token_secret_info.resources[0].data.token | b64decode) if vault_sa_token_secret_info.resources else '' }}"
+        _vault_k8s_ca_crt: "{{ (vault_sa_token_secret_info.resources[0].data['ca.crt'] | b64decode) if vault_sa_token_secret_info.resources else '' }}"
+      when: vault_sa_token_secret_info.resources | default([]) | length > 0
+
+    - name: Fail if SA token JWT or CA cert could not be retrieved
+      ansible.builtin.fail:
+        msg: "Failed to retrieve SA token JWT or CA certificate from secret '{{ vault_k8s_auth_sa_token_secret_name }}' in namespace '{{ vault_namespace }}'. Ensure it exists and contains 'token' and 'ca.crt' data fields."
+      when: _vault_k8s_sa_token_jwt == '' or _vault_k8s_ca_crt == ''
+
+    - name: Enable and configure Kubernetes auth method
+      community.hashi_vault.vault_auth_method:
+        url: "{{ vault_addr }}"
+        token: "{{ vault_root_token }}"
+        validate_certs: "{{ vault_tls_verify_certs }}"
+        auth_method_type: kubernetes
+        path: "{{ vault_kube_auth_path }}"
+        description: "{{ vault_kube_auth_description }}"
+        state: present
+        config:
+          token_reviewer_jwt: "{{ _vault_k8s_sa_token_jwt }}"
+          kubernetes_host: "{{ vault_kube_api_host }}"
+          kubernetes_ca_cert: "{{ _vault_k8s_ca_crt }}"
+          issuer: "{{ vault_kube_issuer }}"
+          disable_local_ca_jwt: false
+      register: vault_kube_auth_config_result
+      changed_when: vault_kube_auth_config_result.changed
+
+    - name: Display Kubernetes auth method configuration result
+      ansible.builtin.debug:
+        var: vault_kube_auth_config_result
+        verbosity: 1
+
+  when:
+    - vault_configure_kube_auth | bool
+    - vault_root_token is defined and vault_root_token != ""
+    - not vault_is_sealed | bool # Ensure Vault is unsealed
+  tags:
+    - vault_auth
+    - vault_auth_kubernetes
+
+# --- Create Default Kubernetes Auth Role ---
+- name: Create default Kubernetes authentication role in Vault
+  block:
+    - name: Create/Update Vault role for Kubernetes auth
+      community.hashi_vault.vault_auth_role:
+        url: "{{ vault_addr }}"
+        token: "{{ vault_root_token }}"
+        validate_certs: "{{ vault_tls_verify_certs }}"
+        method_path: "{{ vault_kube_auth_path }}"
+        role_name: "{{ vault_kube_auth_role_name }}"
+        state: present
+        config:
+          bound_service_account_names: "{{ vault_kube_auth_role_bound_service_account_names }}"
+          bound_service_account_namespaces: "{{ vault_kube_auth_role_bound_service_account_namespaces }}"
+          token_policies: "{{ vault_kube_auth_role_policies }}"
+          token_ttl: "{{ vault_kube_auth_role_token_ttl }}"
+          # token_max_ttl: "{{ vault_kube_auth_role_token_max_ttl }}" # Optional
+          # token_period: "{{ vault_kube_auth_role_token_period }}" # Optional
+      register: vault_kube_auth_role_result
+      changed_when: vault_kube_auth_role_result.changed
+
+    - name: Display Kubernetes auth role creation result
+      ansible.builtin.debug:
+        var: vault_kube_auth_role_result
+        verbosity: 1
+
+  when:
+    - vault_configure_kube_auth | bool
+    - vault_create_default_kube_role | bool
+    - vault_root_token is defined and vault_root_token != ""
+    - not vault_is_sealed | bool # Ensure Vault is unsealed
+  tags:
+    - vault_auth
+    - vault_auth_kubernetes
+    - vault_auth_role
+

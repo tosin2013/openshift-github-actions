@@ -1,0 +1,39 @@
+---
+# defaults file for ansible/roles/vault_post_config
+
+vault_post_config_namespace: "vault"
+_vault_post_config_replicas: 1 # Internal, prefer direct input from playbook
+_vault_post_config_auto_unseal_enabled: false # Internal
+_vault_post_config_cloud_provider: "none" # Internal
+
+# This should be set based on the Helm chart's TLS configuration for the Vault listener
+# It's used to construct VAULT_ADDR (http/https) and set VAULT_SKIP_VERIFY for oc exec commands.
+_vault_post_config_vault_listener_tls_enabled: true
+
+# Directory on the Ansible controller/runner where initialization output will be stored
+_vault_post_config_output_dir: "/tmp/vault_gh_output" # For GitHub Actions runner
+_vault_post_config_init_output_file_name: "vault_init_data.json"
+
+# Pod details for targeting Vault pods
+_vault_post_config_pod_label_selector: "app.kubernetes.io/name=vault,component=server"
+_vault_post_config_container_name: "vault"
+_vault_post_config_service_account_name: "vault" # Service account used by Vault pods
+
+# Retry settings for pod readiness and other operations
+_vault_post_config_pod_ready_retries: 30 # e.g., 30 retries
+_vault_post_config_pod_ready_delay: 10 # e.g., 10 seconds delay
+
+# Base pod name, e.g., 'vault' for 'vault-0', 'vault-1'
+_vault_post_config_pod_base_name: "vault"
+
+# Path to oc client, defaults to whatever is in PATH
+_vault_post_config_oc_executable: "oc"
+
+# Path to jq client, defaults to whatever is in PATH
+_vault_post_config_jq_executable: "jq"
+
+# Unseal keys and root token (only used if Vault is already initialized and needs unsealing with provided keys)
+# These would typically be passed in as 'extra-vars' if this scenario is supported.
+# For initial setup, these are generated.
+_vault_post_config_provided_unseal_keys: []
+_vault_post_config_provided_root_token: ""

@@ -1,0 +1,150 @@
+---
+# tasks file for ansible/roles/vault_post_config
+
+- name: Ensure jq is installed
+  ansible.builtin.command:
+    cmd: "{{ _vault_post_config_jq_executable }} --version"
+  register: jq_check
+  changed_when: false
+  failed_when: jq_check.rc != 0
+  run_once: true
+  tags:
+    - vault_post_config_init
+    - vault_post_config_unseal
+
+- name: Ensure output directory exists on controller
+  ansible.builtin.file:
+    path: "{{ _vault_post_config_output_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  tags:
+    - vault_post_config_init
+
+- name: Define Vault pod name for vault-0
+  ansible.builtin.set_fact:
+    _vault_0_pod_name: "{{ _vault_post_config_pod_base_name }}-0"
+  tags:
+    - vault_post_config_always
+
+- name: Wait for vault-0 pod to be ready
+  ansible.builtin.include_tasks: wait_for_pod_ready.yml
+  vars:
+    _target_pod_name: "{{ _vault_0_pod_name }}"
+    _target_pod_namespace: "{{ vault_post_config_namespace }}"
+  tags:
+    - vault_post_config_init
+    - vault_post_config_unseal
+
+- name: Determine VAULT_ADDR and VAULT_SKIP_VERIFY for oc exec
+  ansible.builtin.set_fact:
+    _vault_exec_addr: "{{ _vault_post_config_vault_listener_tls_enabled | ternary('https://127.0.0.1:8200', 'http://127.0.0.1:8200') }}"
+    _vault_exec_skip_verify: "{{ _vault_post_config_vault_listener_tls_enabled | ternary('true', 'false') }}"
+  tags:
+    - vault_post_config_always
+
+- name: Check if Vault is initialized (on vault-0)
+  ansible.builtin.command:
+    cmd: >-
+      {{ _vault_post_config_oc_executable }} exec {{ _vault_0_pod_name }} 
+      -n "{{ vault_post_config_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" -- 
+      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
+  register: vault_status_check_vault_0
+  changed_when: false
+  tags:
+    - vault_post_config_init
+    - vault_post_config_unseal
+
+- name: Parse vault-0 status output
+  ansible.builtin.set_fact:
+    _vault_0_status: "{{ vault_status_check_vault_0.stdout | from_json | default({}) }}"
+  tags:
+    - vault_post_config_init
+    - vault_post_config_unseal
+
+- name: Debug vault-0 status
+  ansible.builtin.debug:
+    var: _vault_0_status
+  tags:
+    - vault_post_config_debug
+
+- block:
+    - name: Initialize Vault (on vault-0)
+      ansible.builtin.command:
+        cmd: >-
+          {{ _vault_post_config_oc_executable }} exec {{ _vault_0_pod_name }} 
+          -n "{{ vault_post_config_namespace }}" 
+          -c "{{ _vault_post_config_container_name }}" -- 
+          sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault operator init -format=json"
+      register: vault_init_result
+      changed_when: true # Initialization is a change
+
+    - name: Save initialization output to controller
+      ansible.builtin.copy:
+        content: "{{ vault_init_result.stdout }}"
+        dest: "{{ _vault_post_config_output_dir }}/{{ _vault_post_config_init_output_file_name }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Parse initialization output for keys and token
+      ansible.builtin.set_fact:
+        _vault_init_data: "{{ vault_init_result.stdout | from_json }}"
+
+    - name: Unseal vault-0 using generated keys
+      ansible.builtin.include_tasks: unseal_pod.yml
+      vars:
+        _target_pod_name: "{{ _vault_0_pod_name }}"
+        _target_pod_namespace: "{{ vault_post_config_namespace }}"
+        _unseal_keys: "{{ _vault_init_data.unseal_keys_b64 }}"
+        _unseal_threshold: "{{ _vault_init_data.unseal_threshold }}"
+
+    - name: Set fact for root token (to be potentially used by other playbooks/roles if needed)
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ _vault_init_data.root_token }}"
+        cacheable: true # Makes it available to subsequent plays in the same run
+
+  when:
+    - "not (_vault_0_status.initialized | default(false))"
+    - "not (_vault_post_config_auto_unseal_enabled | bool and _vault_post_config_cloud_provider != 'none')"
+  tags:
+    - vault_post_config_init
+
+- block:
+    - name: Vault already initialized, check if sealed (on vault-0)
+      ansible.builtin.debug:
+        msg: "Vault is already initialized. Sealed status: {{ _vault_0_status.sealed | default('unknown') }}"
+
+    - name: Handle already initialized but sealed Vault (on vault-0)
+      ansible.builtin.fail:
+        msg: >-
+          Vault is already initialized but sealed. This role currently expects to initialize Vault 
+          if manual unsealing is chosen. To unseal an already initialized Vault, 
+          provide '_vault_post_config_provided_unseal_keys' via extra-vars.
+      when:
+        - "_vault_0_status.sealed | default(false)"
+        - "not (_vault_post_config_auto_unseal_enabled | bool and _vault_post_config_cloud_provider != 'none')"
+        - "_vault_post_config_provided_unseal_keys | length == 0" # Only fail if no keys provided
+
+    # Add logic here to unseal with _vault_post_config_provided_unseal_keys if they are given
+    # For now, we focus on the initial setup path.
+
+  when:
+    - "_vault_0_status.initialized | default(false)"
+    - "not (_vault_post_config_auto_unseal_enabled | bool and _vault_post_config_cloud_provider != 'none')"
+  tags:
+    - vault_post_config_unseal # This block is more about unsealing an existing init
+
+# Unseal HA pods if applicable
+- name: Unseal HA pods
+  ansible.builtin.include_tasks: unseal_ha_pods.yml
+  when:
+    - "_vault_post_config_replicas | int > 1"
+    - "not (_vault_post_config_auto_unseal_enabled | bool and _vault_post_config_cloud_provider != 'none')"
+    # Ensure vault-0 was initialized by this role run or keys are available
+    - "(_vault_init_data is defined and _vault_init_data.unseal_keys_b64 is defined) or (_vault_post_config_provided_unseal_keys | length > 0)"
+  tags:
+    - vault_post_config_unseal_ha

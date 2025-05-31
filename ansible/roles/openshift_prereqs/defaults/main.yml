@@ -1,0 +1,17 @@
+---
+# defaults file for openshift_prereqs
+vault_scc_name: vault-scc
+vault_service_account_name: vault
+vault_tls_secret_name: vault-tls
+vault_common_name_prefix: vault
+openshift_apps_domain: "" # Will be discovered or can be overridden by user
+tls_cert_dir: "/tmp/vault_tls_certs" # Temp dir on Ansible controller for generated certs
+vault_sa_token_secret_name: "vault-auth-sa-token" # Name of the secret to store the SA token for K8s auth
+
+# HA and PVC Configuration
+vault_ha_enabled: false
+vault_replicas: 3
+vault_pvc_basename: data # PVCs will be named like data-vault-0, data-vault-1
+vault_pvc_storage_size: 1Gi
+vault_pvc_access_modes: ["ReadWriteOnce"]
+vault_pvc_storage_class_name: "" # Empty string means use default StorageClass

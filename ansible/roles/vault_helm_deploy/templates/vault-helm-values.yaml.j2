@@ -1,0 +1,179 @@
+# Ansible-managed Helm values for HashiCorp Vault on OpenShift
+# Template: {{ ansible_managed }}
+
+global:
+  openshift: {{ vault_helm_global_openshift | default(true) }}
+  tlsDisable: {{ vault_helm_global_tlsDisable | default(false) }} # TLS certs are managed by openshift_prereqs role
+
+server:
+  image:
+    repository: "{{ vault_image_repository | default('hashicorp/vault') }}"
+    tag: "{{ vault_image_tag | default('1.15.6') }}" # Make sure this is a valid and desired tag
+
+  serviceAccount:
+    create: false # Managed by openshift_prereqs role
+    name: "{{ vault_service_account_name | default('vault') }}"
+
+  # For OpenShift, ensure securityContext is compatible with your SCC (vault-scc)
+  # The vault-scc allows anyuid, so we might not need to set specific UIDs here.
+  # Setting to null to let SCC dictate, or remove entirely if chart defaults are problematic.
+  # securityContext: null
+  # podSecurityContext: null # Or specific fsGroup if needed and allowed by SCC
+
+  extraEnvironmentVars:
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_DISABLE_MLOCK: "true" # Important for OpenShift SCC
+    VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
+    # VAULT_API_ADDR & VAULT_CLUSTER_ADDR are set differently for standalone vs HA
+    # See standalone.config or ha.config below
+
+  extraVolumes:
+    - type: secret
+      name: "{{ vault_tls_secret_name | default('vault-tls') }}" # TLS secret created by openshift_prereqs
+      mountPath: "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}"
+
+  route:
+    enabled: true
+    host: "{{ vault_common_name_prefix | default('vault') }}.{{ openshift_apps_domain_discovered }}" # Ensure openshift_apps_domain_discovered is set
+    path: "/"
+    tls:
+      termination: passthrough
+
+  # Readiness and Liveness probes might need adjustment for OpenShift
+  # Default Helm chart probes can be too strict.
+  # readinessProbe:
+  #   enabled: true # Consider customizing or disabling if issues arise
+  #   path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+  # livenessProbe:
+  #   enabled: true
+  #   path: "/v1/sys/health?standbyok=true"
+  #   initialDelaySeconds: 60
+
+  auditStorage:
+    enabled: {{ vault_audit_storage_enabled | default(false) }}
+    # size: 1Gi
+    # storageClass:
+
+# Deployment mode: 'standalone' or 'ha'
+{% if vault_deployment_mode == 'standalone' %}
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+      
+      listener "tcp" {
+        address = "0.0.0.0:8200"
+        cluster_address = "0.0.0.0:8201"
+        tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+        tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
+        tls_disable = false # Should be false as per global.tlsDisable
+      }
+
+      storage "raft" {
+        path = "/vault/data"
+        // For a single-node Raft, node_id might still be needed or set by Vault from HOSTNAME
+        // node_id = env "HOSTNAME"
+      }
+      
+      # Set API and Cluster address for standalone
+      api_addr = "https://{{ vault_common_name_prefix | default('vault') }}.{{ openshift_apps_domain_discovered }}:443" # External address
+      # For standalone, cluster_addr might not be strictly necessary if not forming a cluster,
+      # but Vault might still expect it for Raft internal operations.
+      # Using localhost or internal service name if applicable.
+      # cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix }}-internal:8201" # Example if internal service exists
+
+  ha:
+    enabled: false
+    # replicas: 1 # Ignored
+
+  dataStorage:
+    enabled: true # For standalone, Helm chart creates the PVC
+    size: "{{ vault_pvc_storage_size | default('1Gi') }}"
+    # storageClass: "{{ vault_pvc_storage_class_name | default(omit) }}" # Use default SC if empty
+    accessMode: ReadWriteOnce # Common for standalone
+
+{% elif vault_deployment_mode == 'ha' %}
+  standalone:
+    enabled: false
+
+  ha:
+    enabled: true
+    replicas: {{ vault_replicas | default(3) }}
+    # Raft config for HA mode
+    # See https://developer.hashicorp.com/vault/docs/platform/k8s/helm/examples/ha-with-raft
+    config: |
+      ui = true
+
+      listener "tcp" {
+        address = "0.0.0.0:8200"
+        cluster_address = "0.0.0.0:8201"
+        tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+        tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
+        tls_disable = false
+      }
+      
+      storage "raft" {
+        path = "/vault/data"
+        node_id = env "HOSTNAME" # Each pod gets a unique hostname, used as node_id
+
+        # Retry joining other Vault nodes for up to 5 minutes
+        retry_join {
+          leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-0.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+          # auto_join_scheme = "https" # if using https for auto_join
+          # auto_join = "provider=kubernetes namespace={{ vault_namespace }} component=server app=vault"
+        }
+        retry_join {
+          leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-1.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+        }
+        retry_join {
+          leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-2.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+        }
+        # Add more retry_join blocks if vault_replicas > 3
+      }
+
+      # Set API and Cluster address for HA
+      # VAULT_API_ADDR should be the address clients use to reach Vault, typically the Route.
+      api_addr = "https://{{ vault_common_name_prefix | default('vault') }}.{{ openshift_apps_domain_discovered }}:443"
+      # VAULT_CLUSTER_ADDR is used for server-to-server communication within the cluster.
+      # It should resolve to the pod's IP on port 8201.
+      # The chart often sets this via env var VAULT_CLUSTER_ADDR: "https://$(HOSTNAME).{{ vault_helm_release_name }}-internal:8201"
+      # So this might not be needed in HCL if chart handles it.
+      # cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8201"
+
+  # For HA, PVCs are pre-created by openshift_prereqs role.
+  # The Helm chart's dataStorage section might still be relevant for labels or if it tries to create them.
+  # Ensure it doesn't conflict. Setting enabled: false might be an option if PVCs are fully managed externally.
+  # However, the chart might need it to correctly map volumes to pods.
+  # The key is that the names must match what openshift_prereqs created: {{ vault_pvc_basename }}-{{ vault_common_name_prefix }}-{{ item_index }}
+  dataStorage:
+    enabled: true # Keep true for the chart to manage volumeMounts, but PVCs are pre-created
+    # size: "{{ vault_pvc_storage_size | default('1Gi') }}" # Size is on pre-created PVCs
+    # storageClass: "{{ vault_pvc_storage_class_name | default(omit) }}" # SC is on pre-created PVCs
+    # The chart will try to claim existing PVCs if names match.
+    # The StatefulSet volumeClaimTemplates will use this.
+    # We rely on the PVCs being pre-created with names like 'data-vault-0', 'data-vault-1'.
+    # The chart's default volumeClaimTemplate name is `data`.
+    # We need to ensure the StatefulSet uses the correct PVC names.
+    # This might require overriding `volumeClaimTemplates` or ensuring chart's naming matches.
+    # Vault Helm chart typically names PVCs `data-<releasename>-<index>`, e.g. `data-vault-0`.
+    # Our pre-created PVCs are `{{ vault_pvc_basename }}-{{ vault_common_name_prefix }}-{{ item }}`.
+    # If vault_pvc_basename is 'data' and vault_common_name_prefix is 'vault', they match.
+
+{% else %}
+  # This block should not be reached if vault_deployment_mode is correctly set
+  # Consider adding a fail task in Ansible if vault_deployment_mode is invalid
+  error: "Invalid vault_deployment_mode: {{ vault_deployment_mode }}. Must be 'standalone' or 'ha'."
+{% endif %}
+
+# Injector and CSI can be disabled by default
+injector:
+  enabled: {{ vault_injector_enabled | default(false) }}
+  # Ensure injector's agent image also has compatible securityContext if enabled
+  # agent:
+  #   securityContext: null
+
+csi:
+  enabled: {{ vault_csi_enabled | default(false) }}
+  # Ensure CSI provider also has compatible securityContext if enabled
+  # provider:
+  #   securityContext: null

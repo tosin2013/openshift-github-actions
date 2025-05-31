@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: "{{ vault_service_account_name }}"
+  namespace: "{{ vault_namespace }}"
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/instance: vault # Helm chart often uses 'vault' as instance name
