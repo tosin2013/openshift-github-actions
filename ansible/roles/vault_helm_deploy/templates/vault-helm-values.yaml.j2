@@ -89,7 +89,11 @@ server:
   dataStorage:
     enabled: true # For standalone, Helm chart creates the PVC
     size: "{{ vault_pvc_storage_size | default('1Gi') }}"
-    # storageClass: "{{ vault_pvc_storage_class_name | default(omit) }}" # Use default SC if empty
+    {% if _vault_helm_data_storage_class is defined and _vault_helm_data_storage_class != "" %}
+    storageClass: "{{ _vault_helm_data_storage_class }}"
+    {% else %}
+    # storageClass: # Let Helm chart use its default or cluster default StorageClass
+    {% endif %}
     accessMode: ReadWriteOnce # Common for standalone
 
 {% elif vault_deployment_mode == 'ha' %}
@@ -99,6 +103,19 @@ server:
   ha:
     enabled: true
     replicas: {{ vault_replicas | default(3) }}
+    raft:
+      enabled: true
+      # Configures persistence for Raft data.
+      # This is crucial for creating PVCs via volumeClaimTemplates in the StatefulSet.
+      persistence:
+        enabled: true
+        size: "{{ vault_pvc_storage_size | default('10Gi') }}"
+{% if _vault_helm_data_storage_class is defined and _vault_helm_data_storage_class != "" %}
+        storageClass: "{{ _vault_helm_data_storage_class }}"
+{% else %}
+        # storageClass: # Let Helm chart use its default or cluster default StorageClass if not specified
+{% endif %}
+        # accessMode: ReadWriteOnce # Default is usually fine for StatefulSet PVCs
     # Raft config for HA mode
     # See https://developer.hashicorp.com/vault/docs/platform/k8s/helm/examples/ha-with-raft
     config: |
@@ -109,7 +126,7 @@ server:
         cluster_address = "0.0.0.0:8201"
         tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
         tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
-        tls_disable = false
+        tls_disable = 0
       }
       
       storage "raft" {
@@ -144,11 +161,11 @@ server:
   # The Helm chart's dataStorage section might still be relevant for labels or if it tries to create them.
   # Ensure it doesn't conflict. Setting enabled: false might be an option if PVCs are fully managed externally.
   # However, the chart might need it to correctly map volumes to pods.
-  # The key is that the names must match what openshift_prereqs created: {{ vault_pvc_basename }}-{{ vault_common_name_prefix }}-{{ item_index }}
+  # The key is that the names must match what openshift_prereqs created, e.g., vault_pvc_basename-vault_common_name_prefix-0
   dataStorage:
-    enabled: true # Keep true for the chart to manage volumeMounts, but PVCs are pre-created
-    # size: "{{ vault_pvc_storage_size | default('1Gi') }}" # Size is on pre-created PVCs
-    # storageClass: "{{ vault_pvc_storage_class_name | default(omit) }}" # SC is on pre-created PVCs
+    enabled: true # Keep true for the chart to manage volumeMounts.
+    # size is determined by pre-created PVCs or chart defaults if not pre-creating.
+    storageClass: "{{ _vault_helm_data_storage_class }}"
     # The chart will try to claim existing PVCs if names match.
     # The StatefulSet volumeClaimTemplates will use this.
     # We rely on the PVCs being pre-created with names like 'data-vault-0', 'data-vault-1'.
@@ -156,7 +173,7 @@ server:
     # We need to ensure the StatefulSet uses the correct PVC names.
     # This might require overriding `volumeClaimTemplates` or ensuring chart's naming matches.
     # Vault Helm chart typically names PVCs `data-<releasename>-<index>`, e.g. `data-vault-0`.
-    # Our pre-created PVCs are `{{ vault_pvc_basename }}-{{ vault_common_name_prefix }}-{{ item }}`.
+    # Our pre-created PVCs are named like `vault_pvc_basename-vault_common_name_prefix-<index>`.
     # If vault_pvc_basename is 'data' and vault_common_name_prefix is 'vault', they match.
 
 {% else %}
