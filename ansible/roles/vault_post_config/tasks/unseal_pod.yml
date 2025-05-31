@@ -1,0 +1,66 @@
+---
+# tasks file for unsealing a single pod
+
+- name: "Ensure unseal keys and threshold are provided for {{ _target_pod_name }}"
+  ansible.builtin.assert:
+    that:
+      - _unseal_keys is defined
+      - _unseal_keys | length > 0
+      - _unseal_threshold is defined
+      - _unseal_threshold | int > 0
+    fail_msg: "Unseal keys or threshold not properly defined for {{ _target_pod_name }}."
+  tags:
+    - vault_post_config_always
+
+- name: "Unseal {{ _target_pod_name }} in namespace {{ _target_pod_namespace }}"
+  ansible.builtin.command:
+    cmd: >-
+      {{ _vault_post_config_oc_executable }} exec {{ _target_pod_name }} 
+      -n "{{ _target_pod_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" -- 
+      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault operator unseal {{ item }}"
+  register: unseal_result
+  loop: "{{ _unseal_keys[:(_unseal_threshold | int)] }}" # Loop through the required number of keys
+  changed_when: "'Seal Key' in unseal_result.stdout or 'Unseal Key' in unseal_result.stdout" # Crude check, better to check status
+  delay: 2 # Small delay between unseal attempts if needed
+  retries: 3 # Retry individual key unseal if it fails transiently
+  until: unseal_result.rc == 0
+  vars:
+    ansible_failed_task_hook: './dump_pod_info.yml'
+  tags:
+    - vault_post_config_unseal
+
+- name: "Check status of {{ _target_pod_name }} after unseal attempts"
+  ansible.builtin.command:
+    cmd: >-
+      {{ _vault_post_config_oc_executable }} exec {{ _target_pod_name }} 
+      -n "{{ _target_pod_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" -- 
+      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
+  register: post_unseal_status_check
+  changed_when: false
+  tags:
+    - vault_post_config_unseal
+
+- name: Parse post-unseal status for {{ _target_pod_name }}
+  ansible.builtin.set_fact:
+    _pod_unseal_status: "{{ post_unseal_status_check.stdout | from_json | default({}) }}"
+  tags:
+    - vault_post_config_unseal
+
+- name: "Verify {{ _target_pod_name }} is unsealed"
+  ansible.builtin.assert:
+    that:
+      - "_pod_unseal_status.sealed is defined"
+      - "not (_pod_unseal_status.sealed | bool)"
+    fail_msg: "Failed to unseal {{ _target_pod_name }}. Current sealed status: {{ _pod_unseal_status.sealed | default('unknown') }}. Output: {{ post_unseal_status_check.stdout }}"
+  vars:
+    ansible_failed_task_hook: './dump_pod_info.yml'
+  tags:
+    - vault_post_config_unseal
+
+- name: "Debug: {{ _target_pod_name }} unseal status"
+  ansible.builtin.debug:
+    msg: "{{ _target_pod_name }} successfully unsealed. Status: {{ _pod_unseal_status }}"
+  tags:
+    - vault_post_config_debug

@@ -1,0 +1,42 @@
+---
+# tasks file to unseal a single HA pod (called by unseal_ha_pods.yml loop)
+
+- name: "Wait for HA pod {{ _current_ha_pod_name }} to be ready"
+  ansible.builtin.include_tasks: wait_for_pod_ready.yml
+  vars:
+    _target_pod_name: "{{ _current_ha_pod_name }}"
+    _target_pod_namespace: "{{ vault_post_config_namespace }}"
+
+- name: "Check if HA pod {{ _current_ha_pod_name }} is already unsealed"
+  ansible.builtin.command:
+    cmd: >-
+      {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
+      -n "{{ vault_post_config_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" -- 
+      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
+  register: ha_pod_status_check
+  changed_when: false
+  ignore_errors: true # Pod might not be fully responsive yet, or other issues
+
+- name: Parse HA pod {{ _current_ha_pod_name }} status
+  ansible.builtin.set_fact:
+    _ha_pod_status: "{{ ha_pod_status_check.stdout | from_json | default({}) }}"
+    _ha_pod_status_rc: "{{ ha_pod_status_check.rc | default(-1) }}"
+
+- name: "Unseal HA pod {{ _current_ha_pod_name }} if it is sealed"
+  ansible.builtin.include_tasks: unseal_pod.yml
+  vars:
+    _target_pod_name: "{{ _current_ha_pod_name }}"
+    _target_pod_namespace: "{{ vault_post_config_namespace }}"
+    _unseal_keys: "{{ _ha_unseal_keys }}"
+    _unseal_threshold: "{{ _ha_unseal_threshold }}"
+  when:
+    - "_ha_pod_status_rc == 0" # Command succeeded
+    - "_ha_pod_status.initialized | default(false)" # Must be initialized to be unsealed
+    - "_ha_pod_status.sealed | default(true)" # Only if sealed
+
+- name: "Log if HA pod {{ _current_ha_pod_name }} was already unsealed or status check failed"
+  ansible.builtin.debug:
+    msg: "HA pod {{ _current_ha_pod_name }} was already unsealed or its status could not be reliably determined (RC={{ _ha_pod_status_rc }}). Status: {{ _ha_pod_status }}"
+  when:
+    - "_ha_pod_status_rc != 0 or not (_ha_pod_status.sealed | default(true)) or not (_ha_pod_status.initialized | default(false))"

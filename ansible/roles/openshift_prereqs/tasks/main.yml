@@ -1,0 +1,218 @@
+---
+# tasks file for openshift_prereqs
+
+- name: Ensure Vault namespace {{ vault_namespace }} exists
+  kubernetes.core.k8s:
+    name: "{{ vault_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+  tags:
+    - namespace
+
+- name: Apply Vault Security Context Constraint (SCC)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'vault-scc.yaml.j2') }}"
+  # Variables vault_namespace, vault_scc_name, and vault_service_account_name
+  # are used by the vault-scc.yaml.j2 template.
+  # vault_namespace must be passed to the role.
+  # vault_scc_name and vault_service_account_name have defaults.
+  tags:
+    - scc
+
+- name: Ensure Vault ServiceAccount {{ vault_service_account_name }} exists
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'vault-sa.yaml.j2') }}"
+  # Variables vault_namespace and vault_service_account_name are used by the template.
+  # vault_service_account_name has a default.
+  tags:
+    - serviceaccount
+    - rbac
+
+- name: Ensure ServiceAccount token secret {{ vault_sa_token_secret_name }} exists for {{ vault_service_account_name }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ vault_sa_token_secret_name }}"
+        namespace: "{{ vault_namespace }}"
+        annotations:
+          kubernetes.io/service-account.name: "{{ vault_service_account_name }}"
+      type: kubernetes.io/service-account-token
+  tags:
+    - serviceaccount
+    - rbac
+    - secrets
+
+- name: Ensure Vault TokenReview Role and RoleBinding exist
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'vault-tokenreviewer-rbac.yaml.j2') }}"
+  # Variables vault_namespace and vault_service_account_name are used by the template.
+  tags:
+    - rbac
+
+- name: Bind vault-scc to vault ServiceAccount
+  command: "oc adm policy add-scc-to-user {{ vault_scc_name }} -z {{ vault_service_account_name }} -n {{ vault_namespace }}"
+  register: scc_binding_result
+  changed_when: >
+    scc_binding_result.stdout is defined and
+    ("scc_added" in scc_binding_result.stdout or "already a member" not in scc_binding_result.stdout)
+  failed_when: "scc_binding_result.rc != 0 and ('already a member' not in scc_binding_result.stdout and 'already a member' not in scc_binding_result.stderr)"
+  # A more robust check would involve querying the SCC's users list, but this command is somewhat idempotent.
+  tags:
+    - scc
+    - rbac
+
+# TLS Certificate Generation and Secret Creation
+- name: Discover OpenShift Apps Domain if not provided
+  ansible.builtin.command: "oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'"
+  register: apps_domain_cmd_result
+  changed_when: false
+  when: openshift_apps_domain == ""
+  tags:
+    - tls
+    - secrets
+
+- name: Set discovered OpenShift Apps Domain
+  ansible.builtin.set_fact:
+    openshift_apps_domain_discovered: "{{ apps_domain_cmd_result.stdout }}"
+  when: openshift_apps_domain == "" and apps_domain_cmd_result.stdout is defined and apps_domain_cmd_result.stdout != ""
+  tags:
+    - tls
+    - secrets
+
+- name: Set OpenShift Apps Domain to provided value if available
+  ansible.builtin.set_fact:
+    openshift_apps_domain_discovered: "{{ openshift_apps_domain }}"
+  when: openshift_apps_domain != ""
+  tags:
+    - tls
+    - secrets
+
+- name: Fail if OpenShift Apps Domain could not be determined
+  ansible.builtin.fail:
+    msg: "OpenShift Apps Domain (openshift_apps_domain) was not provided and could not be discovered. Please set it or ensure 'oc get ingresses.config.openshift.io cluster' works."
+  when: openshift_apps_domain_discovered is not defined or openshift_apps_domain_discovered == ""
+  tags:
+    - tls
+    - secrets
+
+- name: Ensure local temporary certificate directory exists
+  ansible.builtin.file:
+    path: "{{ tls_cert_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost # This task runs on the Ansible controller
+  become: false
+  tags:
+    - tls
+    - secrets
+
+- name: Generate Vault TLS private key
+  community.crypto.openssl_privatekey:
+    path: "{{ tls_cert_dir }}/vault.key"
+    size: 2048
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  tags:
+    - tls
+    - secrets
+
+- name: Generate Vault TLS Certificate Signing Request (CSR)
+  community.crypto.openssl_csr:
+    path: "{{ tls_cert_dir }}/vault.csr"
+    privatekey_path: "{{ tls_cert_dir }}/vault.key"
+    common_name: "{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
+    organization_name: "Vault" # Can be parameterized if needed
+    subject_alt_name:
+      - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc"
+      - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc.cluster.local"
+      - "DNS:*.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+      - "DNS:*.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+      - "DNS:{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
+      - "DNS:localhost"
+      - "IP:127.0.0.1"
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+  tags:
+    - tls
+    - secrets
+
+- name: Generate self-signed Vault TLS certificate
+  community.crypto.x509_certificate:
+    path: "{{ tls_cert_dir }}/vault.crt"
+    csr_path: "{{ tls_cert_dir }}/vault.csr"
+    privatekey_path: "{{ tls_cert_dir }}/vault.key"
+    provider: selfsigned # Creates a self-signed certificate
+    # selfsigned_not_before: "now" # Default is usually current time, removing to test
+    selfsigned_not_after: "+365d" # End validity in 365 days
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+  tags:
+    - tls
+    - secrets
+
+- name: Create Kubernetes TLS secret for Vault
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ vault_namespace }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ vault_tls_secret_name }}"
+        namespace: "{{ vault_namespace }}"
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ lookup('file', tls_cert_dir + '/vault.crt') | b64encode }}"
+        tls.key: "{{ lookup('file', tls_cert_dir + '/vault.key') | b64encode }}"
+  tags:
+    - tls
+    - secrets
+
+- name: Ensure conflicting ClusterRoleBinding vault-server-binding is absent
+  kubernetes.core.k8s: # Updated FQCN
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: vault-server-binding
+  # This is a cluster-scoped resource, no namespace needed for the resource itself.
+  # We delete it to prevent conflicts if it was managed by a previous Helm release
+  # in a different namespace or with a different release name.
+  tags:
+    - prereqs
+    - cleanup
+
+# Pre-create PersistentVolumeClaims for HA mode
+- name: Pre-create PVCs for Vault HA replicas
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ vault_pvc_basename }}-{{ vault_common_name_prefix }}-{{ item }}"
+        namespace: "{{ vault_namespace }}"
+        labels:
+          app.kubernetes.io/name: "{{ vault_common_name_prefix }}"
+          app.kubernetes.io/instance: "{{ vault_common_name_prefix }}" # Assuming instance name is same as common name prefix
+      spec:
+        accessModes: "{{ vault_pvc_access_modes }}"
+        resources:
+          requests:
+            storage: "{{ vault_pvc_storage_size }}"
+        storageClassName: "{{ vault_pvc_storage_class_name | default(omit) }}"
+  loop: "{{ range(0, vault_replicas | int) | list }}" # Loop from 0 to vault_replicas-1
+  when: vault_ha_enabled | bool
+  tags:
+    - pvc
+    - storage
+    - ha

@@ -1,0 +1,28 @@
+---
+# tasks file for waiting for a specific pod to be ready
+
+- name: "Wait for {{ _target_pod_name }} pod to be Running and container '{{ _vault_post_config_container_name }}' to be Ready"
+  ansible.builtin.command: >-
+    {{ _vault_post_config_oc_executable }} get pod {{ _target_pod_name }}
+    -n "{{ _target_pod_namespace }}"
+    -o jsonpath='{.status.phase} {.status.podIP} {.status.containerStatuses[?(@.name=="{{ _vault_post_config_container_name }}")].ready}'
+  register: pod_status_result
+  until: >-
+    pod_status_result.stdout is defined and
+    (pod_status_result.stdout | trim).split(' ')[0] == 'Running' and
+    (pod_status_result.stdout | trim).split(' ')[1] != '' and
+    (pod_status_result.stdout | trim).split(' ')[2] == 'true'
+  retries: "{{ _vault_post_config_pod_ready_retries }}"
+  delay: "{{ _vault_post_config_pod_ready_delay }}"
+  changed_when: false
+  failed_when: pod_status_result.rc != 0 and "NotFound" not in pod_status_result.stderr # Allow NotFound initially
+  vars:
+    ansible_failed_task_hook: './dump_pod_info.yml'
+  tags:
+    - vault_post_config_always
+
+- name: "Debug: {{ _target_pod_name }} final status after wait"
+  ansible.builtin.debug:
+    msg: "{{ _target_pod_name }} is ready. Status: {{ pod_status_result.stdout | default('N/A') }}"
+  tags:
+    - vault_post_config_debug

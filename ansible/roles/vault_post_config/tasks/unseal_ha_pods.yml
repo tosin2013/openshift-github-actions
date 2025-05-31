@@ -1,0 +1,36 @@
+---
+# tasks file for unsealing HA pods (vault-1 to vault-n)
+
+- name: "Ensure replicas count ({{ _vault_post_config_replicas }}) is greater than 1 for HA unsealing"
+  ansible.builtin.assert:
+    that:
+      - "_vault_post_config_replicas | int > 1"
+    fail_msg: "This task is for HA unsealing and replicas count is not > 1."
+  tags:
+    - vault_post_config_always
+
+- name: "Determine unseal keys and threshold for HA pods"
+  ansible.builtin.set_fact:
+    _ha_unseal_keys: "{{ _vault_init_data.unseal_keys_b64 | default(_vault_post_config_provided_unseal_keys) }}"
+    _ha_unseal_threshold: "{{ _vault_init_data.unseal_threshold | default((_vault_post_config_provided_unseal_keys | length) if (_vault_post_config_provided_unseal_keys | length > 0) else 0) }}"
+  tags:
+    - vault_post_config_always
+
+- name: "Assert that unseal keys and threshold are available for HA unsealing"
+  ansible.builtin.assert:
+    that:
+      - "_ha_unseal_keys | length > 0"
+      - "_ha_unseal_threshold | int > 0"
+    fail_msg: "Unseal keys or threshold not available for HA pod unsealing. Ensure vault-0 was initialized or keys were provided."
+  tags:
+    - vault_post_config_always
+
+- name: Loop through HA pods (vault-1 to vault-{{ _vault_post_config_replicas | int - 1 }}) for unsealing
+  ansible.builtin.include_tasks: unseal_ha_pod_single.yml # Wrapper to handle single HA pod logic
+  loop: "{{ range(1, _vault_post_config_replicas | int) | list }}" # Loop from 1 to replicas-1
+  loop_control:
+    loop_var: _pod_index
+  vars:
+    _current_ha_pod_name: "{{ _vault_post_config_pod_base_name }}-{{ _pod_index }}"
+  tags:
+    - vault_post_config_unseal_ha

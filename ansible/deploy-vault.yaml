@@ -1,0 +1,132 @@
+---
+- name: Deploy HashiCorp Vault on OpenShift
+  hosts: localhost
+  connection: local
+  gather_facts: false # Facts about localhost are not critical for these tasks
+
+  vars:
+    # --- Critical Playbook Inputs ---
+    vault_namespace: "vault-ansible-test" # Target namespace for all resources
+    vault_deployment_mode: "standalone"   # "standalone" or "ha"
+    vault_ha_enabled: "{{ vault_deployment_mode == 'ha' }}"
+    vault_replicas: "{{ 3 if vault_deployment_mode == 'ha' else 1 }}"
+
+    # --- Auto Unseal Configuration ---
+    # Controls whether the vault_post_config role attempts manual init/unseal.
+    # Possible values: "none", "aws-kms", "azure-keyvault", "gcp-kms", etc.
+    # If not "none", the vault_post_config role will be skipped.
+    vault_auto_unseal_method: "none"
+
+    # --- Helm Chart Configuration Overrides (relevant for post-config) ---
+    # This should reflect the actual TLS setting passed to/used by the Helm chart for the listener.
+    # The vault_post_config role uses this to set VAULT_ADDR (http/https) for oc exec commands.
+    vault_helm_listener_tls_enabled: true
+
+    # --- Overridable variables for openshift_prereqs role ---
+    # openshift_apps_domain: "apps.mycluster.example.com" # Uncomment and set if discovery fails or to override
+    vault_common_name_prefix: "vault" # Used for cert CN, route, service names etc.
+    # vault_scc_name: vault-scc
+    # vault_service_account_name: vault
+    # vault_tls_secret_name: vault-tls
+    # tls_cert_dir: "/tmp/vault_tls_certs_playbook" # Override temp cert dir if needed
+
+    # --- Overridable variables for HA PVCs (used by openshift_prereqs) ---
+    # vault_replicas: 3
+    # vault_pvc_basename: data # PVCs will be named like data-vault-0
+    # vault_pvc_storage_size: 1Gi
+    # vault_pvc_access_modes: ["ReadWriteOnce"]
+    # vault_pvc_storage_class_name: "" # Empty for default SC
+
+    # --- Overridable variables for vault_helm_deploy role ---
+    # vault_helm_release_name: vault
+    # vault_helm_chart_version: "0.28.0"
+    # vault_image_tag: "1.15.6"
+    # vault_audit_storage_enabled: false
+    # vault_injector_enabled: false
+    # vault_csi_enabled: false
+
+  pre_tasks:
+    - name: Display Python interpreter path
+      ansible.builtin.debug:
+        var: ansible_python_interpreter
+      run_once: true
+    - name: Ensure target namespace {{ vault_namespace }} is absent before deployment
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ vault_namespace }}"
+        state: absent
+      ignore_errors: true # In case the namespace doesn't exist initially
+
+    - name: Pause for 30 seconds to allow namespace deletion to complete
+      ansible.builtin.pause:
+        seconds: 30
+
+  roles:
+    - role: openshift_prereqs
+      # Variables like vault_namespace, vault_ha_enabled, vault_replicas,
+      # vault_common_name_prefix, openshift_apps_domain (if set above)
+      # will be available to this role.
+      # The role will set the 'openshift_apps_domain_discovered' fact.
+
+    - role: vault_helm_deploy
+      # This role uses vault_namespace, vault_deployment_mode,
+      # and variables set as facts by openshift_prereqs (e.g., openshift_apps_domain_discovered),
+      # as well as defaults from both roles (e.g., vault_tls_secret_name, vault_service_account_name).
+
+  post_tasks:
+    - name: Determine cloud provider for auto-unseal (if not 'none')
+      ansible.builtin.set_fact:
+        _derived_cloud_provider_for_post_config: |
+          {% if vault_auto_unseal_method == "aws-kms" %}aws
+          {% elif vault_auto_unseal_method == "azure-keyvault" %}azure
+          {% elif vault_auto_unseal_method == "gcp-kms" %}gcp
+          {% else %}none{% endif %}
+      run_once: true
+
+    - name: Include Vault Post Configuration tasks (Init/Unseal)
+      ansible.builtin.include_role:
+        name: vault_post_config
+      vars:
+        vault_post_config_namespace: "{{ vault_namespace }}"
+        _vault_post_config_replicas: "{{ vault_replicas }}"
+        _vault_post_config_auto_unseal_enabled: "{{ vault_auto_unseal_method != 'none' }}"
+        _vault_post_config_cloud_provider: "{{ _derived_cloud_provider_for_post_config | default('none') }}"
+        _vault_post_config_vault_listener_tls_enabled: "{{ vault_helm_listener_tls_enabled }}"
+        _vault_post_config_pod_base_name: "{{ vault_common_name_prefix | default('vault') }}"
+        # _vault_post_config_provided_unseal_keys: [] # Pass if unsealing an existing Vault
+        # _vault_post_config_provided_root_token: ""   # Pass if unsealing an existing Vault
+      when:
+        - vault_auto_unseal_method == "none"
+      run_once: true # This role manages its own looping for HA if needed
+
+    - name: Display Deployment Information
+      ansible.builtin.debug:
+        msg: |
+          HashiCorp Vault Ansible deployment summary:
+          ------------------------------------------
+          Target Namespace: {{ vault_namespace }}
+          Deployment Mode: {{ vault_deployment_mode }}
+          {% if vault_ha_enabled %}
+          HA Replicas: {{ vault_replicas }}
+          PVCs Pre-created: Yes (e.g., {{ vault_pvc_basename | default(openshift_prereqs_vault_pvc_basename | default('data')) }}-{{ vault_common_name_prefix | default('vault') }}-0)
+          {% else %}
+          HA Replicas: N/A (Standalone Mode)
+          PVCs Pre-created: No (Helm chart will create one for standalone)
+          {% endif %}
+          Vault Route Host: {{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}
+          TLS Secret Name: {{ vault_tls_secret_name | default(openshift_prereqs_vault_tls_secret_name | default('vault-tls')) }}
+          Service Account: {{ vault_service_account_name | default(openshift_prereqs_vault_service_account_name | default('vault')) }}
+          SCC Applied: {{ vault_scc_name | default(openshift_prereqs_vault_scc_name | default('vault-scc')) }}
+          Helm Release Name: {{ vault_helm_release_name | default(vault_helm_deploy_vault_helm_release_name | default('vault')) }}
+          Helm Chart Version: {{ vault_helm_chart_version | default(vault_helm_deploy_vault_helm_chart_version | default('0.28.0')) }}
+          Vault Image: {{ vault_image_repository | default(vault_helm_deploy_vault_image_repository | default('hashicorp/vault')) }}:{{ vault_image_tag | default(vault_helm_deploy_vault_image_tag | default('1.15.6')) }}
+          Auto Unseal Method: {{ vault_auto_unseal_method }}
+          {% if vault_auto_unseal_method == 'none' %}
+          Initialization/Unseal: Handled by 'vault_post_config' Ansible role. Output in {{ _vault_post_config_output_dir | default('/tmp/vault_gh_output') }}/{{ _vault_post_config_init_output_file_name | default('vault_init_data.json') }} on runner.
+          {% else %}
+          Initialization/Unseal: Expected to be handled by Vault's auto-unseal mechanism ({{ vault_auto_unseal_method }}).
+          {% endif %}
+
+          To run this playbook:
+          ansible-playbook ansible/deploy-vault.yaml --extra-vars "vault_namespace=my-custom-vault-ns openshift_apps_domain=apps.my.cluster.com"
