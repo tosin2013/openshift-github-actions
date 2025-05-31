@@ -57,547 +57,184 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up OpenShift CLI
         uses: redhat-actions/openshift-tools-installer@v1
         with:
           oc: '4.18'
-      
+
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
           version: 'v3.14.0'
-      
+
       - name: Log in to OpenShift
         uses: redhat-actions/oc-login@v1
         with:
           openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
           openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
           insecure_skip_tls_verify: true
-      
 
-      
-      - name: Create Vault namespace
-        run: |
-          oc create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | oc apply -f -
-      
-      - name: Create Vault Security Context Constraint
-        run: |
-          cat <<EOF | oc apply -f -
-          apiVersion: security.openshift.io/v1
-          kind: SecurityContextConstraints
-          metadata:
-            name: vault-scc
-          allowHostDirVolumePlugin: false
-          allowHostIPC: false # Vault may use IPC, but with mlock disabled, this might be okay. Test.
-          allowHostNetwork: false
-          allowHostPID: false
-          allowHostPorts: false
-          allowPrivilegeEscalation: true # Often needed by Vault
-          allowPrivilegedContainer: false
-          allowedCapabilities: # IPC_LOCK is common if mlock is not disabled. Since it is, this might be empty or minimal.
-            # - IPC_LOCK # Add if testing reveals VAULT_DISABLE_MLOCK="true" is not sufficient or desired.
-            - NET_BIND_SERVICE # To bind to low ports if not running as root (though Vault usually runs >1024)
-          defaultAddCapabilities: null
-          fsGroup:
-            type: RunAsAny
-          readOnlyRootFilesystem: false
-          requiredDropCapabilities:
-            - MKNOD # Example of a commonly dropped capability
-          runAsUser:
-            type: RunAsAny # Consider restricting to a specific UID range used by the Vault image/container
-          seLinuxContext:
-            type: MustRunAs # Or RunAsAny, consult Vault image requirements & OpenShift policy
-          supplementalGroups:
-            type: RunAsAny
-          volumes:
-            - configMap
-            - downwardAPI
-            - emptyDir
-            - persistentVolumeClaim
-            - projected
-            - secret
-          EOF
-      
-      - name: Add HashiCorp Helm repository
-        run: |
-          helm repo add hashicorp https://helm.releases.hashicorp.com
-          helm repo update
-          # Verify latest Vault chart version
-          helm search repo hashicorp/vault --version "^0.30.0" -l 1
-      
-      - name: Create Vault ServiceAccount
-        run: |
-          cat <<EOF | oc apply -f -
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: vault
-            namespace: ${{ github.event.inputs.namespace }}
-            labels:
-              app.kubernetes.io/name: vault
-              app.kubernetes.io/instance: vault
-          EOF
-      
-      - name: Create Role and RoleBinding for TokenReview
-        run: |
-          cat <<EOF | oc apply -f -
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: Role
-          metadata:
-            name: vault-tokenreviewer
-            namespace: ${{ github.event.inputs.namespace }}
-          rules:
-          - apiGroups: ["authentication.k8s.io"]
-            resources: ["tokenreviews"]
-            verbs: ["create"]
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: RoleBinding
-          metadata:
-            name: vault-tokenreviewer-binding
-            namespace: ${{ github.event.inputs.namespace }}
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: Role
-            name: vault-tokenreviewer
-          subjects:
-          - kind: ServiceAccount
-            name: vault
-            namespace: ${{ github.event.inputs.namespace }}
-          EOF
-      
-      - name: Bind vault-scc to vault ServiceAccount
-        run: |
-          oc adm policy add-scc-to-user vault-scc -z vault -n ${{ github.event.inputs.namespace }}
-      
-      - name: Generate TLS Certificate and Create Secret
-        run: |
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          # Attempt to discover apps domain. This is a common OpenShift pattern but might need adjustment.
-          # Fallback to a placeholder if discovery fails, consider making APPS_DOMAIN an input for robustness.
-          APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
-          
-          echo "Generating self-signed TLS certificate for Vault..."
-          echo "Using APPS_DOMAIN: $APPS_DOMAIN for one of the SANs."
-          
-          openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout vault.key -out vault.crt \
-            -subj "/CN=vault.$NAMESPACE.svc/O=Vault" \
-            -addext "subjectAltName = DNS:vault-${{ github.event.inputs.namespace }}.${APPS_DOMAIN},DNS:vault,DNS:vault.${{ github.event.inputs.namespace }},DNS:vault.${{ github.event.inputs.namespace }}.svc,DNS:vault.${{ github.event.inputs.namespace }}.svc.cluster.local,DNS:localhost,DNS:*.vault-internal,DNS:*.vault-internal.${{ github.event.inputs.namespace }}.svc.cluster.local"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-          echo "Creating Kubernetes TLS secret 'vault-tls'..."
-          oc create secret tls vault-tls \
-            --cert=vault.crt \
-            --key=vault.key \
-            -n $NAMESPACE \
-            --dry-run=client -o yaml | oc apply -f -
-          
-          echo "TLS secret 'vault-tls' created."
-          # Clean up local cert files
-          rm -f vault.key vault.crt
-      
-      - name: Create PVCs for Vault
+      - name: Install Ansible and collections
         run: |
-          echo "Creating PVCs for Vault storage..."
-          
-          # Get the number of replicas
-          REPLICAS=${{ github.event.inputs.replicas }}
-          
-          # Create PVCs for each replica
-          for i in $(seq 0 $(($REPLICAS - 1))); do
-            cat > vault-pvc-$i.yaml <<EOF
-          apiVersion: v1
-          kind: PersistentVolumeClaim
-          metadata:
-            name: data-vault-$i
-            namespace: ${{ github.event.inputs.namespace }}
-            labels:
-              app.kubernetes.io/name: vault
-              app.kubernetes.io/instance: vault
-              component: server
-          spec:
-            accessModes:
-              - ReadWriteOnce
-            resources:
-              requests:
-                storage: 10Gi
-            storageClassName: ${{ github.event.inputs.storage_class }}
-          EOF
-            
-            # Apply the PVC
-            oc apply -f vault-pvc-$i.yaml
-            echo "Created PVC for Vault replica $i"
-          done
-          
-          echo "All Vault PVCs created successfully"
-      
-      - name: Generate Vault values file
-        run: |
-          echo "Generating Helm values file for Vault with OpenShift-specific configurations..."
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          AUTO_UNSEAL=${{ github.event.inputs.auto_unseal }}
-          CLOUD_PROVIDER=${{ github.event.inputs.cloud_provider }}
-          REPLICAS=${{ github.event.inputs.replicas }}
+          python -m pip install --upgrade pip
+          pip install ansible pyyaml kubernetes openshift
+          ansible-galaxy collection install kubernetes.core community.kubernetes community.general
 
-          export NAMESPACE
-          export REPLICAS
-
-          APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "apps.cluster.example.com")
-          export APPS_DOMAIN
-          echo "Using APPS_DOMAIN: $APPS_DOMAIN for Vault route."
-
-          # Construct the HCL configuration string
-          HCL_CONFIG="ui = true\n"
-          HCL_CONFIG="${HCL_CONFIG}disable_mlock = true\n\n"
-          HCL_CONFIG="${HCL_CONFIG}listener \"tcp\" {\n"
-          HCL_CONFIG="${HCL_CONFIG}  address = \"0.0.0.0:8200\"\n"
-          HCL_CONFIG="${HCL_CONFIG}  cluster_address = \"0.0.0.0:8201\"\n"
-          HCL_CONFIG="${HCL_CONFIG}  tls_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
-          HCL_CONFIG="${HCL_CONFIG}  tls_key_file  = \"/vault/userconfig/vault-tls/tls.key\"\n"
-          HCL_CONFIG="${HCL_CONFIG}  tls_disable = false\n"
-          HCL_CONFIG="${HCL_CONFIG}}\n\n"
-          HCL_CONFIG="${HCL_CONFIG}storage \"raft\" {\n"
-          HCL_CONFIG="${HCL_CONFIG}  path = \"/vault/data\"\n"
-          HCL_CONFIG="${HCL_CONFIG}  node_id = env \"HOSTNAME\"\n"
-          # Add retry_join for HA robustness - loop for up to 'replicas' count
-          # This assumes vault-N.vault-internal service names are resolvable
-          for i in $(seq 0 $(($REPLICAS - 1))); do
-            HCL_CONFIG="${HCL_CONFIG}  retry_join {\n"
-            HCL_CONFIG="${HCL_CONFIG}    leader_api_addr = \"https://vault-${i}.vault-internal.${NAMESPACE}.svc:8200\"\n"
-            HCL_CONFIG="${HCL_CONFIG}    leader_ca_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
-            HCL_CONFIG="${HCL_CONFIG}    leader_client_cert_file = \"/vault/userconfig/vault-tls/tls.crt\"\n"
-            HCL_CONFIG="${HCL_CONFIG}    leader_client_key_file = \"/vault/userconfig/vault-tls/tls.key\"\n"
-            HCL_CONFIG="${HCL_CONFIG}  }\n"
-          done
-          HCL_CONFIG="${HCL_CONFIG}}\n"
-
-          if [ "$AUTO_UNSEAL" == "true" ]; then
-            if [ "$CLOUD_PROVIDER" == "aws" ]; then
-              HCL_CONFIG="${HCL_CONFIG}\nseal \"awskms\" {\n"
-              HCL_CONFIG="${HCL_CONFIG}  region     = \"${{ secrets.AWS_REGION }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}  kms_key_id = \"${{ secrets.VAULT_AWS_KMS_KEY_ID }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}}\n"
-            elif [ "$CLOUD_PROVIDER" == "azure" ]; then
-              HCL_CONFIG="${HCL_CONFIG}\nseal \"azurekeyvault\" {\n"
-              HCL_CONFIG="${HCL_CONFIG}  tenant_id      = \"${{ secrets.AZURE_TENANT_ID }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}  client_id      = \"${{ secrets.AZURE_CLIENT_ID }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}  client_secret  = \"${{ secrets.AZURE_CLIENT_SECRET }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}  vault_name     = \"${{ secrets.AZURE_KEY_VAULT_NAME }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}  key_name       = \"${{ secrets.AZURE_KEY_VAULT_KEY_NAME }}\"\n"
-              HCL_CONFIG="${HCL_CONFIG}}\n"
-            else
-              echo "::warning::Auto-unseal is enabled but CLOUD_PROVIDER is not 'aws' or 'azure'. Seal configuration will be omitted."
-            fi
-          fi
-
-          # Use yq to build the values file
-          YQ_EXPRESSION_PART1_LINES=(
-            ".global.openshift = true"
-            ".global.tlsDisable = false"
-            ".server.ha.enabled = true"
-            ".server.ha.replicas = env(REPLICAS)"
-            ".server.ha.raft.enabled = true"
-            ".server.ha.raft.setNodeId = true"
-            ".server.route.enabled = true"
-            ".server.route.host = \"vault-\" + env(NAMESPACE) + \".\" + env(APPS_DOMAIN)" # Escaped quotes for shell string
-            ".server.route.path = \"/\""
-            ".server.route.tls.termination = \"passthrough\""
-            ".server.extraEnvironmentVars.VAULT_SKIP_VERIFY = \"true\""
-            ".server.extraEnvironmentVars.VAULT_DISABLE_MLOCK = \"true\""
-            ".server.extraEnvironmentVars.VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK = \"true\""
-            ".server.extraEnvironmentVars.VAULT_LOG_LEVEL = \"info\""
-            ".server.extraEnvironmentVars.VAULT_API_ADDR = \"https://0.0.0.0:8200\""
-            ".server.extraEnvironmentVars.VAULT_CLUSTER_ADDR = \"https://\${HOSTNAME}.vault-internal:8201\"" # ${HOSTNAME} is expanded by shell
-            ".server.extraVolumes[0].type = \"secret\""
-            ".server.extraVolumes[0].name = \"vault-tls\""
-            ".server.extraVolumes[0].mountPath = \"/vault/userconfig/vault-tls\""
-            ".server.readinessProbe.enabled = false"
-            ".server.livenessProbe.enabled = true"
-            ".server.livenessProbe.path = \"/v1/sys/health?standbyok=true\""
-            ".server.livenessProbe.initialDelaySeconds = 60"
-            ".server.dataStorage.enabled = true"
-            ".server.dataStorage.mountPath = \"/vault/data\""
-            ".server.securityContext.runAsNonRoot = true"
-            ".server.securityContext.runAsUser = 1000"
-            ".server.securityContext.runAsGroup = 1000"
-            ".server.securityContext.fsGroup = 1000"
-            ".server.securityContext.capabilities.drop[0] = \"ALL\""
-            ".server.securityContext.capabilities.add[0] = \"IPC_LOCK\""
-            ".injector.enabled = ${{ github.event.inputs.injector_enabled }}"
-            ".csi.enabled = ${{ github.event.inputs.csi_enabled }}"
-            ".ui.enabled = ${{ github.event.inputs.ui_enabled }}"
-            ".ui.serviceType = \"ClusterIP\""
-          )
-          TEMP_EXPR=$(printf " | %s" "${YQ_EXPRESSION_PART1_LINES[@]}")
-          YQ_EXPRESSION_PART1=${TEMP_EXPR# | } # Remove leading " | "
-
-          yq eval -n "$YQ_EXPRESSION_PART1" > vault-values.yaml
-
-          # Inject the HCL configuration using yq
-          export HCL_CONFIG
-          yq eval --inplace '.server.ha.config = env(HCL_CONFIG)' vault-values.yaml
-
-          echo "Generated vault-values.yaml:"
-          cat vault-values.yaml
-      
-      - name: Deploy Vault using Helm
-        run: |
-          echo "Attempting to delete existing Vault ServiceAccount to prevent conflict..."
-          oc delete sa vault -n ${{ github.event.inputs.namespace }} --ignore-not-found=true
-
-          echo "Deploying Vault using Helm..."
-          # Deploy Vault using Helm with the values file
-          helm upgrade --install vault hashicorp/vault \
-            --namespace ${{ github.event.inputs.namespace }} \
-            --version 0.30.0 \
-            --values vault-values.yaml
-          
-          echo "Vault deployment initiated. Waiting for pods to be created..."
-          sleep 30
-      
-      - name: Wait for Vault pods to start
-        run: |
-          echo "Waiting for service accounts to be created..."
-          sleep 10
-          
-          # Bind the SCC to Vault service accounts
-          echo "Binding vault-scc to Vault service accounts..."
-          oc adm policy add-scc-to-user vault-scc -z vault -n ${{ github.event.inputs.namespace }}
-          oc adm policy add-scc-to-user vault-scc -z vault-agent-injector -n ${{ github.event.inputs.namespace }}
-          
-          # Wait for pods to be created (not ready, just running)
-          echo "Waiting for Vault pods to be created..."
-          # Wait for the statefulset to create the pods
-          for i in {1..30}; do
-            if oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} | grep -q "vault-0"; then
-              echo "Vault pods are being created..."
-              break
-            fi
-            echo "Waiting for Vault pods to be created... ($i/30)"
-            sleep 10
-          done
-          
-          # Wait for the pods to be in Running state (they won't be Ready until initialized and unsealed)
-          echo "Waiting for Vault pods to be in Running state..."
-          for i in {1..30}; do
-            RUNNING_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | wc -w)
-            TOTAL_COUNT=$(oc get pods -l app.kubernetes.io/name=vault -n ${{ github.event.inputs.namespace }} --no-headers | wc -l)
-            echo "Running pods: $RUNNING_COUNT/$TOTAL_COUNT"
-            if [ "$RUNNING_COUNT" -eq "$TOTAL_COUNT" ] && [ "$TOTAL_COUNT" -gt 0 ]; then
-              echo "All Vault pods are running."
-              break
-            fi
-            echo "Waiting for all Vault pods to be running... ($i/30)"
-            sleep 10
-          done
-      
-      - name: Wait for Vault container to be running
-        run: |
-          echo "Waiting for Vault container to be running..."
-          # Wait for the Vault container to be in Running state before attempting to initialize
-          for i in {1..30}; do
-            if oc get pod vault-0 -n ${{ github.event.inputs.namespace }} -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Running"; then
-              echo "Vault pod is running."
-              break
-            fi
-            
-            if [ $i -eq 30 ]; then
-              echo "Timed out waiting for Vault pod to be running."
-              oc get pods -n ${{ github.event.inputs.namespace }}
-              exit 1
-            fi
-            
-            echo "Waiting for Vault pod to be running... ($i/30)"
-            sleep 10
-          done
-          
-          # Wait a bit longer to ensure the container is fully started
-          echo "Waiting for Vault container to stabilize..."
-          sleep 20
-      
-      # Wait for Vault pods to be ready before proceeding with initialization
-      - name: Wait for Vault pods to be ready
-        id: wait_for_vault_pods
-        run: |
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          REPLICAS=${{ github.event.inputs.replicas }}
-          ./scripts/common/wait_for_vault_pods.sh "$NAMESPACE" "$REPLICAS"
-      
-      # Initialize and unseal Vault if auto-unseal is disabled
-      - name: Initialize and Unseal Vault (if manual unseal)
-        if: github.event.inputs.auto_unseal == 'false'
-        id: initialize_unseal_vault
+      - name: Run Ansible Playbook for Vault Deployment
         env:
-          # Pass GitHub Actions inputs and secrets to the script environment
-          GITHUB_EVENT_INPUTS_NAMESPACE: ${{ github.event.inputs.namespace }}
-          GITHUB_EVENT_INPUTS_REPLICAS: ${{ github.event.inputs.replicas }}
-          GITHUB_EVENT_INPUTS_AUTO_UNSEAL: ${{ github.event.inputs.auto_unseal }}
-          # SECRETS_VAULT_ROOT_TOKEN will be used by the script if Vault is already initialized
-          SECRETS_VAULT_ROOT_TOKEN: ${{ secrets.VAULT_ROOT_TOKEN }}
-          SECRETS_VAULT_UNSEAL_KEY_0: ${{ secrets.VAULT_UNSEAL_KEY_0 }}
-          SECRETS_VAULT_UNSEAL_KEY_1: ${{ secrets.VAULT_UNSEAL_KEY_1 }}
-          SECRETS_VAULT_UNSEAL_KEY_2: ${{ secrets.VAULT_UNSEAL_KEY_2 }}
-          SECRETS_VAULT_UNSEAL_KEY_3: ${{ secrets.VAULT_UNSEAL_KEY_3 }}
-          SECRETS_VAULT_UNSEAL_KEY_4: ${{ secrets.VAULT_UNSEAL_KEY_4 }}
+          INPUT_NAMESPACE: ${{ github.event.inputs.namespace }}
+          INPUT_HELM_CHART_VERSION: ${{ github.event.inputs.helm_chart_version }}
+          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          INPUT_REPLICAS: ${{ github.event.inputs.replicas }}
+          INPUT_UI_ENABLED: ${{ github.event.inputs.ui_enabled }}
+          INPUT_CLOUD_PROVIDER: ${{ github.event.inputs.cloud_provider }}
+          INPUT_AUTO_UNSEAL: ${{ github.event.inputs.auto_unseal }}
+          INPUT_AWS_REGION: ${{ github.event.inputs.aws_region }}
+          INPUT_HELM_TLS_ENABLED: ${{ github.event.inputs.helm_tls_enabled }}
+
+          SECRET_OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+          SECRET_OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+          SECRET_AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          SECRET_AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          SECRET_VAULT_AWS_KMS_KEY_ID: ${{ secrets.VAULT_AWS_KMS_KEY_ID }}
+          SECRET_AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          SECRET_AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SECRET_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SECRET_VAULT_AZURE_KEY_VAULT_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_NAME }}
+          SECRET_VAULT_AZURE_KEY_VAULT_KEY_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_KEY_NAME }}
         run: |
-          echo "Executing scripts/common/initialize_unseal_vault.sh for manual initialization and unsealing..."
-          chmod +x ./scripts/common/initialize_unseal_vault.sh
-          ./scripts/common/initialize_unseal_vault.sh
-      
-      # Verify Vault status after initialization/unsealing
-      - name: Verify Vault status
-        id: verify_vault_status
+          ansible-playbook ansible/deploy-vault.yaml \
+            -i ansible/inventory/hosts.ini \
+            --extra-vars "target_hosts=localhost" \
+            -e "vault_namespace=${{ env.INPUT_NAMESPACE }}" \
+            -e "vault_helm_chart_version=${{ env.INPUT_HELM_CHART_VERSION }}" \
+            -e "vault_image_tag=${{ env.INPUT_IMAGE_TAG }}" \
+            -e "vault_replicas=${{ env.INPUT_REPLICAS }}" \
+            -e "vault_ui_enabled=${{ env.INPUT_UI_ENABLED }}" \
+            -e "cloud_provider=${{ env.INPUT_CLOUD_PROVIDER }}" \
+            -e "vault_deployment_mode=${{ (env.INPUT_REPLICAS == '1' || env.INPUT_REPLICAS == 1) && 'standalone' || 'ha' }}" \
+            -e "vault_auto_unseal_method=${{ env.INPUT_AUTO_UNSEAL }}" \
+            -e "vault_helm_listener_tls_enabled=${{ env.INPUT_HELM_TLS_ENABLED }}" \
+            -e "cloud_provider_for_helm=${{ env.INPUT_CLOUD_PROVIDER }}" \
+            -e "openshift_server_url=${{ env.SECRET_OPENSHIFT_SERVER }}" \
+            -e "openshift_token=${{ env.SECRET_OPENSHIFT_TOKEN }}" \
+            -e "aws_access_key_id=${{ env.SECRET_AWS_ACCESS_KEY_ID }}" \
+            -e "aws_secret_access_key=${{ env.SECRET_AWS_SECRET_ACCESS_KEY }}" \
+            -e "aws_region=${{ env.INPUT_AWS_REGION }}" \
+            -e "vault_aws_kms_key_id=${{ env.SECRET_VAULT_AWS_KMS_KEY_ID }}" \
+            -e "azure_client_id=${{ env.SECRET_AZURE_CLIENT_ID }}" \
+            -e "azure_client_secret=${{ env.SECRET_AZURE_CLIENT_SECRET }}" \
+            -e "azure_tenant_id=${{ env.SECRET_AZURE_TENANT_ID }}" \
+            -e "vault_azure_key_vault_name=${{ env.SECRET_VAULT_AZURE_KEY_VAULT_NAME }}" \
+            -e "vault_azure_key_vault_key_name=${{ env.SECRET_VAULT_AZURE_KEY_VAULT_KEY_NAME }}" \
+            -e "ansible_python_interpreter=$(which python)"
+
+      - name: Read Vault Init/Unseal Output from Ansible
+        if: ${{ github.event.inputs.auto_unseal == 'none' }}
+        id: read_ansible_vault_output
         run: |
-          NAMESPACE=${{ github.event.inputs.namespace }}
-          # Use a longer timeout to ensure Vault has enough time to stabilize
-          TIMEOUT=120
-          echo "Verifying Vault status with a timeout of $TIMEOUT seconds..."
-          
-          # Check if any Vault pods are unsealed
-          if oc exec -n "$NAMESPACE" vault-0 -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status" 2>/dev/null | grep -q 'Sealed.*false'; then
-            echo "✅ Vault is unsealed and operational"
-            exit 0
-          else
-            echo "❌ Vault is still sealed or not responding"
-            oc get pods -n "$NAMESPACE" -l app.kubernetes.io/name=vault -o wide
+          echo "INFO: Reading Vault initialization data from Ansible role output..."
+          INIT_DATA_FILE="/tmp/vault_gh_output/vault_init_data.json" # As defined in vault_post_config role defaults
+
+          if [ ! -f "$INIT_DATA_FILE" ]; then
+            echo "ERROR: Vault initialization data file '$INIT_DATA_FILE' not found. Ansible role might have failed or did not create it."
             exit 1
           fi
-        continue-on-error: true  # Continue even if verification fails to allow for debugging
-      
-      # Output final status
-      - name: Output Vault status
-        if: always() && steps.verify_vault_status.conclusion == 'success'
-        run: |
-          echo "✅ Vault deployment and initialization completed successfully."
-          echo "Root Token: ${{ env.VAULT_ROOT_TOKEN || 'Not available' }}"
-          
-          # Get the Vault UI URL if enabled
-          if [ "${{ github.event.inputs.ui_enabled }}" = "true" ]; then
-            VAULT_ROUTE=$(oc get route vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || echo "Not available")
-            echo "Vault UI: https://$VAULT_ROUTE"
-          fi
-      
-      - name: Output Vault status (failure case)
-        if: always() && steps.verify_vault_status.conclusion != 'success'
-        run: |
-          echo "::error::Vault verification failed. Check the logs above for details."
-          echo "Root Token: ${{ env.VAULT_ROOT_TOKEN || 'Not available' }}"
-          echo "\nCurrent Vault pods status:"
-          oc get pods -n ${{ github.event.inputs.namespace }} -l app.kubernetes.io/name=vault -o wide
-          
-          # Show logs from the primary Vault pod for debugging
-          echo "\n=== Vault logs (vault-0) ==="
-          oc logs -n ${{ github.event.inputs.namespace }} vault-0 --tail=50 || true
-          
-          exit 1
-      
-      - name: Configure Kubernetes Auth Method in Vault
-        if: steps.verify_vault_status.conclusion == 'success'
-        env:
-          VAULT_ROOT_TOKEN: ${{ env.VAULT_ROOT_TOKEN }}
-          NAMESPACE: ${{ github.event.inputs.namespace }}
-        run: |
-          echo "Configuring Kubernetes authentication method in Vault..."
 
-          echo "Retrieving token for 'vault' service account..."
-          VAULT_SA_TOKEN=$(oc sa get-token vault -n "$NAMESPACE")
-          if [ -z "$VAULT_SA_TOKEN" ]; then
-            echo "::error::Failed to retrieve token for 'vault' service account."
+          if ! command -v jq &> /dev/null; then
+            echo "ERROR: jq is not installed. Cannot parse init data."
             exit 1
           fi
-          echo "::add-mask::$VAULT_SA_TOKEN"
 
-          echo "Enabling Kubernetes auth method..."
-          # Check if already enabled, otherwise enable it
-          AUTH_LIST_OUTPUT=$(oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
-            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault auth list -format=json")
-          if echo "$AUTH_LIST_OUTPUT" | jq -e '.["kubernetes/"]' > /dev/null; then
-            echo "Kubernetes auth method already enabled."
-          else
-            if ! oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
-              "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault auth enable kubernetes"; then
-              echo "::error::Failed to enable Kubernetes auth method."
-              exit 1
+          INIT_OUTPUT=$(cat "$INIT_DATA_FILE")
+          ROOT_TOKEN=$(echo "$INIT_OUTPUT" | jq -r .root_token 2>/dev/null)
+          UNSEAL_KEYS_B64_JSON=$(echo "$INIT_OUTPUT" | jq -c .unseal_keys_b64 2>/dev/null) # Keep as compact JSON array
+
+          if [ -z "$ROOT_TOKEN" ] || [ "$ROOT_TOKEN" == "null" ] || [ -z "$UNSEAL_KEYS_B64_JSON" ] || [ "$UNSEAL_KEYS_B64_JSON" == "null" ]; then
+            echo "ERROR: Failed to parse root_token or unseal_keys_b64 from $INIT_DATA_FILE."
+            echo "Content of $INIT_DATA_FILE:"
+            cat "$INIT_DATA_FILE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ROOT_TOKEN"
+          echo "root_token=$ROOT_TOKEN" >> $GITHUB_OUTPUT
+          echo "INFO: Root token captured from Ansible output and masked."
+
+          # Output unseal keys one by one for easier secret management if desired
+          # Max 5 keys are usually generated by Vault init
+          for i in $(seq 0 4); do # Assuming max 5 keys (0 to 4)
+            key=$(echo "$UNSEAL_KEYS_B64_JSON" | jq -r .[$i] 2>/dev/null)
+            if [ -n "$key" ] && [ "$key" != "null" ]; then
+              echo "::add-mask::$key"
+              echo "unseal_key_$((i+1))=$key" >> $GITHUB_OUTPUT
             else
-              echo "Kubernetes auth method enabled successfully."
+              # Break if no more keys (jq returns null for out of bounds)
+              break
             fi
-          fi
-          
-          echo "Writing Kubernetes auth config..."
-          # K8S_ISSUER should align with your cluster's service account issuer
-          # For OpenShift, it's typically like this, but verify for your specific version/config if issues arise.
-          K8S_ISSUER="https://kubernetes.default.svc.cluster.local"
+          done
+          echo "INFO: Unseal keys captured from Ansible output and masked."
+          echo "IMPORTANT: Record the Root Token and Unseal Keys securely. They are output by this step."
 
-          oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
-            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault write auth/kubernetes/config \
-            token_reviewer_jwt='$VAULT_SA_TOKEN' \
-            kubernetes_host='https://kubernetes.default.svc' \
-            kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
-            issuer='$K8S_ISSUER' \
-            disable_local_ca_jwt=false"
-          
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to write Kubernetes auth config to Vault."
-            echo "::group::vault-0 logs on K8s auth config failure"
-            oc logs -n "$NAMESPACE" vault-0 --tail=50 || echo "Failed to get vault-0 logs."
-            echo "::endgroup::"
-            exit 1
-          fi
-
-          echo "Creating example Kubernetes auth role 'my-app-role'..."
-          oc exec -n "$NAMESPACE" vault-0 -- /bin/sh -c \
-            "VAULT_TOKEN=\"$VAULT_ROOT_TOKEN\" VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault write auth/kubernetes/role/my-app-role \
-            bound_service_account_names=my-app-sa \
-            bound_service_account_namespaces='$NAMESPACE' \
-            policies=default,my-app-policy \
-            ttl=24h"
-          
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to create 'my-app-role' in Vault."
-            echo "::group::vault-0 logs on K8s role creation failure"
-            oc logs -n "$NAMESPACE" vault-0 --tail=50 || echo "Failed to get vault-0 logs."
-            echo "::endgroup::"
-            # Consider not exiting fatally here if an example role failing is not critical
-            # exit 1 
-            echo "::warning::Failed to create example 'my-app-role'. This might not be critical."
-          fi
-
-          echo "Kubernetes auth method configuration attempt completed."
-      
-      - name: Create Route for Vault UI
+      - name: Get Vault Route
         if: ${{ github.event.inputs.ui_enabled == 'true' }}
+        id: get_vault_route
         run: |
-          cat <<EOF | oc apply -f -
-          apiVersion: route.openshift.io/v1
-          kind: Route
-          metadata:
-            name: vault
-            namespace: ${{ github.event.inputs.namespace }}
-          spec:
-            port:
-              targetPort: 8200
-            tls:
-              termination: passthrough
-            to:
-              kind: Service
-              name: vault
-              weight: 100
-          EOF
+          echo "INFO: Waiting for Vault route to be created by Ansible/Helm..."
+          VAULT_ROUTE_NAME="vault" # Assuming Helm release name is 'vault'
+          ROUTE_HOST=""
+          RETRY_COUNT=0
+          MAX_RETRIES=12 # Wait for up to 2 minutes (12 * 10 seconds)
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            ROUTE_HOST=$(oc get route $VAULT_ROUTE_NAME -n ${{ github.event.inputs.namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+            if [ -n "$ROUTE_HOST" ]; then
+              echo "INFO: Vault route found: $ROUTE_HOST"
+              break
+            fi
+            echo "INFO: Vault route $VAULT_ROUTE_NAME not found yet. Retrying in 10 seconds... ($((RETRY_COUNT+1))/$MAX_RETRIES)"
+            sleep 10
+            RETRY_COUNT=$((RETRY_COUNT+1))
+          done
+
+          if [ -z "$ROUTE_HOST" ]; then
+            echo "ERROR: Vault route $VAULT_ROUTE_NAME could not be found after $MAX_RETRIES retries."
+            # Attempt to list routes to help debug
+            oc get route -n ${{ github.event.inputs.namespace }}
+            exit 1
+          fi
           
-          VAULT_ROUTE=$(oc get route vault -n ${{ github.event.inputs.namespace }} -o jsonpath='{.spec.host}')
-          echo "Vault UI is accessible at: https://$VAULT_ROUTE"
-          echo "VAULT_ROUTE=$VAULT_ROUTE" >> $GITHUB_ENV
+          echo "Vault UI is accessible at: https://$ROUTE_HOST"
+          echo "VAULT_ROUTE=$ROUTE_HOST" >> $GITHUB_ENV
+          echo "route_host=$ROUTE_HOST" >> $GITHUB_OUTPUT
       
       - name: Output Vault Information
+        if: ${{ steps.read_ansible_vault_output.outputs.root_token != '' && github.event.inputs.auto_unseal == 'none' }}
         run: |
           echo "Vault has been successfully deployed to OpenShift"
           echo "Namespace: ${{ github.event.inputs.namespace }}"
           if [[ "${{ github.event.inputs.ui_enabled }}" == "true" ]]; then
             echo "Vault UI URL: https://${{ env.VAULT_ROUTE }}"
           fi
-          echo "To use Vault, you'll need the root token and unseal keys that were generated"
-          echo "These have been stored as outputs of this workflow run"
+          if ${{ github.event.inputs.auto_unseal == false && github.event.inputs.cloud_provider == 'none' }};
+          then
+            echo "INFO: Vault was initialized and unsealed by this workflow."
+            echo "IMPORTANT: The Root Token and Unseal Keys were generated and output by the 'read_ansible_vault_output' step."
+            echo "Retrieve them from that step's outputs in this workflow run and STORE THEM SECURELY."
+            echo "It is recommended to store them as GitHub secrets (e.g., VAULT_ROOT_TOKEN, VAULT_UNSEAL_KEY_1, etc.) for future operations if needed."
+          elif ${{ github.event.inputs.auto_unseal == true && github.event.inputs.cloud_provider != 'none' }};
+          then
+            echo "INFO: Vault is configured for auto-unsealing using ${{ github.event.inputs.cloud_provider }}."
+            echo "No manual unseal keys are generated or managed by this workflow in this mode."
+            echo "The root token, if this is the first initialization, would typically be retrieved via cloud provider mechanisms or Vault logs during initial setup."
+          else
+            echo "INFO: Vault deployment status regarding initialization and unsealing depends on the configuration provided."
+          fi
           
           # Instructions for configuring GitHub repository
           echo "To configure your GitHub repository to use this Vault instance:"
