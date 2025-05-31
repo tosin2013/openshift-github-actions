@@ -54,6 +54,7 @@
       sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
   register: vault_status_check_vault_0
   changed_when: false
+  failed_when: vault_status_check_vault_0.rc not in [0, 2] # rc 0 is OK, rc 2 means not initialized or sealed
   tags:
     - vault_post_config_init
     - vault_post_config_unseal
