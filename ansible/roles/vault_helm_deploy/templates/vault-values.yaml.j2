@@ -83,9 +83,13 @@ server:
       listener "tcp" {
         address = "0.0.0.0:8200"
         cluster_address = "0.0.0.0:8201"
+{% if vault_tls_enabled | default(true) %}
         tls_cert_file = "/vault/userconfig/vault-tls/tls.crt"
         tls_key_file  = "/vault/userconfig/vault-tls/tls.key"
         tls_disable = false
+{% else %}
+        tls_disable = true
+{% endif %}
       }
 
       # Raft is Vault's integrated storage solution.
@@ -118,6 +122,9 @@ server:
   ha:
     enabled: {{ (vault_ha_enabled | string | lower == 'true') | lower }}
     replicas: {{ vault_replicas if (vault_ha_enabled | string | lower == 'true') else 1 }}
+    raft:
+      enabled: true
+      setNodeId: true
 {% if vault_ha_enabled | string | lower == 'true' %}
     config: |
 {% else %}
@@ -129,10 +136,14 @@ server:
       listener "tcp" {
         address = "0.0.0.0:8200"
         cluster_address = "0.0.0.0:8201"
+{% if vault_tls_enabled | default(true) %}
         tls_cert_file = "/vault/userconfig/vault-tls/tls.crt"
         tls_key_file  = "/vault/userconfig/vault-tls/tls.key"
         tls_client_ca_file = "/vault/userconfig/vault-tls/ca.crt" # Assuming ca.crt is part of the secret
         tls_disable = false
+{% else %}
+        tls_disable = true
+{% endif %}
       }
 
       # Raft is Vault's integrated storage solution.
@@ -140,10 +151,14 @@ server:
       storage "raft" {
         path = "/vault/data"
         retry_join {
-          leader_api_addr = "http://vault-0.vault-internal:8200"
+{% if vault_tls_enabled | default(true) %}
+          leader_api_addr = "https://vault-0.vault-internal:8200"
           leader_ca_cert_file = "/vault/userconfig/vault-tls/ca.crt"
           leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
           leader_client_key_file = "/vault/userconfig/vault-tls/tls.key"
+{% else %}
+          leader_api_addr = "http://vault-0.vault-internal:8200"
+{% endif %}
         }
         # node_id configuration will be handled by StatefulSet pod names
       }
@@ -184,9 +199,11 @@ server:
 {% endif %}
 
   extraVolumes:
+{% if vault_tls_enabled | default(true) %}
     - type: secret
       name: vault-tls # Name of the Secret object for TLS certs created by openshift_prereqs
-      mountPath: "/vault/userconfig/tls/vault-tls"
+      mountPath: "/vault/userconfig/vault-tls"
+{% endif %}
 {% if vault_auto_unseal_enabled and vault_auto_unseal_cloud_provider == 'gcp' and vault_gcp_sa_credentials_secret_name %}
     - type: secret
       name: "{{ vault_gcp_sa_credentials_secret_name }}" # Name of the Secret for GCP SA creds

@@ -3,7 +3,10 @@
 
 global:
   openshift: {{ vault_helm_global_openshift | default(true) }}
-  tlsDisable: {{ vault_helm_global_tlsDisable | default(false) }} # TLS certs are managed by openshift_prereqs role
+  enabled: true
+  # CRITICAL: tlsDisable must be false to enable TLS
+  # This is a double negative - false means TLS is enabled
+  tlsDisable: false
 
 server:
   image:
@@ -26,6 +29,26 @@ server:
     VAULT_DISABLE_CONSUL_STORAGE_MIGRATION_CHECK: "true"
     # VAULT_API_ADDR & VAULT_CLUSTER_ADDR are set differently for standalone vs HA
     # See standalone.config or ha.config below
+    
+  # CRITICAL: Force TLS to be enabled in the extraConfig
+  # This is the main listener configuration that overrides any defaults
+  extraConfig: |
+    # This listener configuration is critical for TLS to work properly
+    ui = true
+    disable_mlock = true
+    
+    listener "tcp" {
+      address = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+      # tls_disable = 0 means TLS is ENABLED (this is a double negative)
+      tls_disable = 0
+      # These paths must match the volume mount paths defined in extraVolumes
+      tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+      tls_key_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
+    }
+    
+    # Disable the default config that might be overriding our TLS settings
+    service_registration "kubernetes" {}
 
   extraVolumes:
     - type: secret
@@ -39,15 +62,33 @@ server:
     tls:
       termination: passthrough
 
-  # Readiness and Liveness probes might need adjustment for OpenShift
-  # Default Helm chart probes can be too strict.
-  # readinessProbe:
-  #   enabled: true # Consider customizing or disabling if issues arise
-  #   path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
-  # livenessProbe:
-  #   enabled: true
-  #   path: "/v1/sys/health?standbyok=true"
-  #   initialDelaySeconds: 60
+  # CRITICAL: Readiness and Liveness probes must use TLS skip verification
+  # These probes are essential for Kubernetes to determine if Vault is healthy
+  # We use exec probes with -tls-skip-verify flag because the pod's internal
+  # certificate might not be trusted by the pod itself
+  readinessProbe:
+    enabled: true
+    exec:
+      # Using -tls-skip-verify because we're connecting to Vault over HTTPS
+      # but the certificate is self-signed
+      command: ["/bin/sh", "-ec", "export VAULT_SKIP_VERIFY=true && VAULT_ADDR=https://127.0.0.1:8200 vault status -tls-skip-verify"]
+    failureThreshold: 2
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  livenessProbe:
+    # Temporarily disable liveness probe until the cluster is stable
+    enabled: false
+    exec:
+      # Using -tls-skip-verify because we're connecting to Vault over HTTPS
+      # but the certificate is self-signed
+      command: ["/bin/sh", "-ec", "export VAULT_SKIP_VERIFY=true && VAULT_ADDR=https://127.0.0.1:8200 vault status -tls-skip-verify"]
+    failureThreshold: 3
+    initialDelaySeconds: 120
+    periodSeconds: 15
+    successThreshold: 1
+    timeoutSeconds: 5
 
   auditStorage:
     enabled: {{ vault_audit_storage_enabled | default(false) }}
@@ -58,29 +99,20 @@ server:
 {% if vault_deployment_mode == 'standalone' %}
   standalone:
     enabled: true
+    # Minimal config for standalone mode - the extraConfig handles most of the configuration
     config: |
-      ui = true
-      
-      listener "tcp" {
-        address = "0.0.0.0:8200"
-        cluster_address = "0.0.0.0:8201"
-        tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
-        tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
-        tls_disable = false # Should be false as per global.tlsDisable
-      }
-
+      # Storage configuration only - the main listener is configured in extraConfig
       storage "raft" {
         path = "/vault/data"
-        // For a single-node Raft, node_id might still be needed or set by Vault from HOSTNAME
-        // node_id = env "HOSTNAME"
+        # For a single-node Raft, node_id might still be needed or set by Vault from HOSTNAME
+        node_id = env "HOSTNAME"
       }
       
-      # Set API and Cluster address for standalone
+      # Set API address for standalone
       api_addr = "https://{{ vault_common_name_prefix | default('vault') }}.{{ openshift_apps_domain_discovered }}:443" # External address
       # For standalone, cluster_addr might not be strictly necessary if not forming a cluster,
       # but Vault might still expect it for Raft internal operations.
-      # Using localhost or internal service name if applicable.
-      # cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix }}-internal:8201" # Example if internal service exists
+      cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8201"
 
   ha:
     enabled: false
@@ -101,7 +133,7 @@ server:
     enabled: false
 
   ha:
-    enabled: true
+    enabled: {{ vault_ha_enabled | default(true) | lower }}
     replicas: {{ vault_replicas | default(3) }}
     raft:
       enabled: true
@@ -109,25 +141,12 @@ server:
       # This is crucial for creating PVCs via volumeClaimTemplates in the StatefulSet.
       persistence:
         enabled: true
-        size: "{{ vault_pvc_storage_size | default('10Gi') }}"
-{% if _vault_helm_data_storage_class is defined and _vault_helm_data_storage_class != "" %}
-        storageClass: "{{ _vault_helm_data_storage_class }}"
-{% else %}
-        # storageClass: # Let Helm chart use its default or cluster default StorageClass if not specified
-{% endif %}
+        size: "{{ vault_pvc_size | default('1Gi') }}"
+        storageClass: "{{ _vault_helm_data_storage_class | default(vault_storage_class) }}"
         # accessMode: ReadWriteOnce # Default is usually fine for StatefulSet PVCs
-    # Raft config for HA mode
+    # Raft config for HA mode - minimal config as the main settings are in extraConfig
     # See https://developer.hashicorp.com/vault/docs/platform/k8s/helm/examples/ha-with-raft
     config: |
-      ui = true
-
-      listener "tcp" {
-        address = "0.0.0.0:8200"
-        cluster_address = "0.0.0.0:8201"
-        tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
-        tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
-        tls_disable = 0
-      }
       
       storage "raft" {
         path = "/vault/data"
@@ -136,32 +155,38 @@ server:
         # Retry joining other Vault nodes for up to 5 minutes
         retry_join {
           leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-0.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
-          # auto_join_scheme = "https" # if using https for auto_join
-          # auto_join = "provider=kubernetes namespace={{ vault_namespace }} component=server app=vault"
+          leader_ca_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_key_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
         }
         retry_join {
           leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-1.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+          leader_ca_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_key_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
         }
         retry_join {
           leader_api_addr = "https://{{ vault_common_name_prefix | default('vault') }}-2.{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+          leader_ca_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+          leader_client_key_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
         }
         # Add more retry_join blocks if vault_replicas > 3
       }
 
       # Set API and Cluster address for HA
-      # VAULT_API_ADDR should be the address clients use to reach Vault, typically the Route.
-      api_addr = "https://{{ vault_common_name_prefix | default('vault') }}.{{ openshift_apps_domain_discovered }}:443"
+      # VAULT_API_ADDR should be the address clients use to reach Vault, typically the pod's own address
+      # This is critical for proper Raft cluster formation
+      api_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8200"
+      
       # VAULT_CLUSTER_ADDR is used for server-to-server communication within the cluster.
-      # It should resolve to the pod's IP on port 8201.
-      # The chart often sets this via env var VAULT_CLUSTER_ADDR: "https://$(HOSTNAME).{{ vault_helm_release_name }}-internal:8201"
-      # So this might not be needed in HCL if chart handles it.
-      # cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8201"
+      # It should resolve to the pod's hostname on port 8201.
+      cluster_addr = "https://$(HOSTNAME).{{ vault_common_name_prefix | default('vault') }}-internal.{{ vault_namespace }}.svc:8201"
 
   # For HA, PVCs are pre-created by openshift_prereqs role.
   # The Helm chart's dataStorage section might still be relevant for labels or if it tries to create them.
-  # Ensure it doesn't conflict. Setting enabled: false might be an option if PVCs are fully managed externally.
-  # However, the chart might need it to correctly map volumes to pods.
-  # The key is that the names must match what openshift_prereqs created, e.g., vault_pvc_basename-vault_common_name_prefix-0
+  # We're setting enabled: true to ensure the chart correctly maps volumes to pods.
+  # The key is that the names must match what openshift_prereqs created, e.g., data-vault-0
   dataStorage:
     enabled: true # Keep true for the chart to manage volumeMounts.
     # size is determined by pre-created PVCs or chart defaults if not pre-creating.

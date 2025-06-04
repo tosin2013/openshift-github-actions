@@ -1,0 +1,45 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: {{ vault_namespace }}
+spec:
+  secretName: vault-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days
+  subject:
+    organizations:
+      - HashiCorp
+  commonName: vault.{{ vault_namespace }}.local
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - vault-{{ vault_namespace }}.{{ vault_domain }}  # OpenShift auto-generated route hostname
+    - vault.{{ vault_domain }}
+    - vault-active.{{ vault_domain }}
+    - vault-standby.{{ vault_domain }}
+    - vault-ui.{{ vault_domain }}
+    - vault-0
+    - vault-1
+    - vault-2
+    - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
+    - vault-0.vault-internal.{{ vault_namespace }}.svc.cluster.local
+    - vault-1.vault-internal.{{ vault_namespace }}.svc.cluster.local
+    - vault-2.vault-internal.{{ vault_namespace }}.svc.cluster.local
+    - vault-active.{{ vault_namespace }}.svc.cluster.local
+    - vault-standby.{{ vault_namespace }}.svc.cluster.local
+    - vault.{{ vault_namespace }}.svc.cluster.local
+    - localhost
+    - 127.0.0.1
+  issuerRef:
+    name: vault-issuer
+    kind: Issuer
+    group: cert-manager.io
