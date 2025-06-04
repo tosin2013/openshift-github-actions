@@ -1,2 +1,31 @@
-complete_ebook.md
 .venv/
+
+# Vault sensitive files
+vault-keys.env
+vault-tls-config.hcl
+/tmp/root-token.txt
+/tmp/unseal-keys.txt
+/tmp/raft-peers.txt
+
+# OpenShift sensitive files
+*.token
+*-token.txt
+kubeconfig*
+
+# Rendered templates (may contain sensitive data)
+rendered_templates/
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
