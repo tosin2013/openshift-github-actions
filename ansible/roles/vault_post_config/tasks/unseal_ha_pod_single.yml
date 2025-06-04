@@ -7,9 +7,22 @@
     _target_pod_name: "{{ _current_ha_pod_name }}"
     _target_pod_namespace: "{{ vault_post_config_namespace }}"
 
+- name: "Wait for HA pod {{ _current_ha_pod_name }} logs to indicate it's attempting to join the cluster"
+  ansible.builtin.command:
+    cmd: >
+      {{ _vault_post_config_oc_executable }} logs {{ _current_ha_pod_name }} 
+      -n "{{ vault_post_config_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" | grep -q "attempting to join possible raft leader node"
+  register: ha_pod_join_check
+  until: ha_pod_join_check.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+  ignore_errors: true # Continue even if we can't confirm it's trying to join
+
 - name: "Check if HA pod {{ _current_ha_pod_name }} is already unsealed"
   ansible.builtin.command:
-    cmd: >-
+    cmd: >
       {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
       -n "{{ vault_post_config_namespace }}" 
       -c "{{ _vault_post_config_container_name }}" -- 
@@ -24,19 +37,74 @@
     _ha_pod_status_rc: "{{ ha_pod_status_check.rc | default(-1) }}"
 
 - name: "Unseal HA pod {{ _current_ha_pod_name }} if it is sealed"
-  ansible.builtin.include_tasks: unseal_pod.yml
-  vars:
-    _target_pod_name: "{{ _current_ha_pod_name }}"
-    _target_pod_namespace: "{{ vault_post_config_namespace }}"
-    _unseal_keys: "{{ _ha_unseal_keys }}"
-    _unseal_threshold: "{{ _ha_unseal_threshold }}"
+  block:
+    - name: "Apply unseal key 1 to {{ _current_ha_pod_name }}"
+      ansible.builtin.command:
+        cmd: >
+          {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
+          -n "{{ vault_post_config_namespace }}" 
+          -c "{{ _vault_post_config_container_name }}" -- 
+          sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault operator unseal {{ _ha_unseal_keys[0] }}"
+      register: unseal_result_1
+      changed_when: true
+
+    - name: "Wait 5 seconds for unseal operation to process"
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: "Apply unseal key 2 to {{ _current_ha_pod_name }}"
+      ansible.builtin.command:
+        cmd: >
+          {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
+          -n "{{ vault_post_config_namespace }}" 
+          -c "{{ _vault_post_config_container_name }}" -- 
+          sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault operator unseal {{ _ha_unseal_keys[1] }}"
+      register: unseal_result_2
+      changed_when: true
+
+    - name: "Wait 5 seconds for unseal operation to process"
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: "Apply unseal key 3 to {{ _current_ha_pod_name }}"
+      ansible.builtin.command:
+        cmd: >
+          {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
+          -n "{{ vault_post_config_namespace }}" 
+          -c "{{ _vault_post_config_container_name }}" -- 
+          sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault operator unseal {{ _ha_unseal_keys[2] }}"
+      register: unseal_result_3
+      changed_when: true
   when:
     - "_ha_pod_status_rc == 0" # Command succeeded
     - "_ha_pod_status.initialized | default(false)" # Must be initialized to be unsealed
     - "_ha_pod_status.sealed | default(true)" # Only if sealed
 
-- name: "Log if HA pod {{ _current_ha_pod_name }} was already unsealed or status check failed"
+- name: "Wait for HA pod {{ _current_ha_pod_name }} to join the Raft cluster"
+  ansible.builtin.command:
+    cmd: >
+      {{ _vault_post_config_oc_executable }} logs {{ _current_ha_pod_name }} 
+      -n "{{ vault_post_config_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" | grep -q "vault is unsealed"
+  register: ha_pod_unsealed_check
+  until: ha_pod_unsealed_check.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
+  ignore_errors: true # Continue even if we can't confirm it's unsealed
+
+- name: "Verify HA pod {{ _current_ha_pod_name }} status after unsealing"
+  ansible.builtin.command:
+    cmd: >
+      {{ _vault_post_config_oc_executable }} exec {{ _current_ha_pod_name }} 
+      -n "{{ vault_post_config_namespace }}" 
+      -c "{{ _vault_post_config_container_name }}" -- 
+      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
+  register: ha_pod_final_status
+  changed_when: false
+  ignore_errors: true
+
+- name: "Log HA pod {{ _current_ha_pod_name }} final status"
   ansible.builtin.debug:
-    msg: "HA pod {{ _current_ha_pod_name }} was already unsealed or its status could not be reliably determined (RC={{ _ha_pod_status_rc }}). Status: {{ _ha_pod_status }}"
-  when:
-    - "_ha_pod_status_rc != 0 or not (_ha_pod_status.sealed | default(true)) or not (_ha_pod_status.initialized | default(false))"
+    msg: "HA pod {{ _current_ha_pod_name }} final status: {{ ha_pod_final_status.stdout | from_json | default({}) }}"
+  when: ha_pod_final_status.rc == 0
