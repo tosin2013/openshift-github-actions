@@ -17,14 +17,23 @@
     mode: '0644'
   # Variables for the template are taken from defaults and playbook vars
 
+- name: Set values files list with default template
+  ansible.builtin.set_fact:
+    _values_files_list:
+      - "/tmp/vault-helm-values.yaml"
+
+- name: Add custom values file to list if provided
+  ansible.builtin.set_fact:
+    _values_files_list: "{{ _values_files_list + [vault_helm_custom_values_file] }}"
+  when: vault_helm_custom_values_file is defined and vault_helm_custom_values_file | length > 0
+
 - name: Deploy Vault using Helm chart
   kubernetes.core.helm:
     name: "{{ vault_helm_release_name }}"
     chart_ref: "{{ vault_helm_chart_name }}"
     release_namespace: "{{ vault_namespace }}"
     create_namespace: false # Namespace should be created by openshift_prereqs role
-    values_files:
-      - "/tmp/vault-helm-values.yaml"
+    values_files: "{{ _values_files_list }}"
     chart_version: "{{ vault_helm_chart_version }}"
     wait: true
     timeout: "10m0s"

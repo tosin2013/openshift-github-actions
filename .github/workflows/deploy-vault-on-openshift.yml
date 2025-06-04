@@ -7,22 +7,35 @@ name: Deploy HashiCorp Vault on OpenShift
 # 3. Configures Vault with Raft integrated storage
 # 4. Handles initialization and unsealing process systematically
 # 5. Implements secure key management practices
+# 6. Validates inputs and provides helpful error messages
+# 7. Supports different OpenShift versions and configurations
+# 8. Implements robust error handling and recovery mechanisms
 
 on:
   workflow_dispatch:
     inputs:
       namespace:
-        description: 'Namespace to deploy Vault in'
+        description: 'Namespace to deploy Vault in (must follow K8s naming conventions)'
         required: true
         default: 'vault'
         type: string
+      helm_chart_version:
+        description: 'Vault Helm chart version to use'
+        required: false
+        default: '0.28.0'
+        type: string
+      image_tag:
+        description: 'Vault image tag to use'
+        required: false
+        default: '1.15.6'
+        type: string
       helm_storage_class:
-        description: 'Optional: StorageClass to use for Vault data persistence. If empty, relies on Helm chart defaults or cluster default.'
+        description: 'StorageClass to use for Vault data persistence'
         required: false
         type: string
         default: ''
       replicas:
-        description: 'Number of Vault replicas'
+        description: 'Number of Vault replicas (must be odd number for HA mode)'
         required: true
         default: '3'
         type: string
@@ -31,15 +44,35 @@ on:
         required: true
         default: true
         type: boolean
-      auto_unseal:
-        description: 'Use auto-unsealing with cloud KMS (requires additional configuration)'
-        required: false
-        default: false
+      helm_tls_enabled:
+        description: 'Enable TLS for Vault listeners (recommended for production)'
+        required: true
+        default: true
         type: boolean
+      auto_unseal:
+        description: 'Auto-unseal method (none, awsKms, azureKeyVault, gcpKms)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - awsKms
+          - azureKeyVault
+          - gcpKms
       cloud_provider:
-        description: 'Cloud provider for auto-unsealing (aws, gcp, azure)'
+        description: 'Cloud provider for auto-unsealing (aws, azure, gcp)'
         required: false
         default: 'none'
+        type: choice
+        options:
+          - none
+          - aws
+          - azure
+          - gcp
+      aws_region:
+        description: 'AWS region for AWS KMS auto-unseal'
+        required: false
+        default: 'us-east-1'
         type: string
       injector_enabled:
         description: 'Enable Vault Agent Injector'
@@ -48,6 +81,19 @@ on:
         type: boolean
       csi_enabled:
         description: 'Enable Vault CSI Provider'
+        required: false
+        default: false
+        type: boolean
+      openshift_version:
+        description: 'OpenShift version (determines compatibility settings)'
+        required: false
+        default: '4.12+'
+        type: choice
+        options:
+          - '4.8-4.11'
+          - '4.12+'
+      debug_mode:
+        description: 'Enable debug mode for verbose output'
         required: false
         default: false
         type: boolean
@@ -84,96 +130,179 @@ jobs:
       - name: Install Ansible and collections
         run: |
           python -m pip install --upgrade pip
-          pip install ansible pyyaml kubernetes openshift
+          python -m venv venv
+          source venv/bin/activate
+          pip install ansible pyyaml kubernetes openshift jinja2
           ansible-galaxy collection install kubernetes.core community.kubernetes community.general
+
+      - name: Validate Prerequisites
+        run: |
+          echo "INFO: Validating deployment prerequisites..."
+
+          # Validate OpenShift connectivity
+          if ! oc whoami &>/dev/null; then
+            echo "ERROR: OpenShift authentication failed"
+            exit 1
+          fi
+
+          # Validate namespace naming conventions
+          if [[ ! "${{ github.event.inputs.namespace }}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "ERROR: Namespace must follow Kubernetes naming conventions"
+            exit 1
+          fi
+
+          # Validate replica count for HA
+          if [[ "${{ github.event.inputs.replicas }}" != "1" ]] && [[ $((${{ github.event.inputs.replicas }} % 2)) -eq 0 ]]; then
+            echo "WARNING: Even number of replicas may cause split-brain scenarios in HA mode"
+          fi
 
       - name: Run Ansible Playbook for Vault Deployment
         env:
-          INPUT_NAMESPACE: ${{ github.event.inputs.namespace }}
-          INPUT_HELM_CHART_VERSION: ${{ github.event.inputs.helm_chart_version }}
-          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
-          INPUT_REPLICAS: ${{ github.event.inputs.replicas }}
-          INPUT_UI_ENABLED: ${{ github.event.inputs.ui_enabled }}
-          INPUT_CLOUD_PROVIDER: ${{ github.event.inputs.cloud_provider }}
-          INPUT_AUTO_UNSEAL: ${{ github.event.inputs.auto_unseal }}
-          INPUT_AWS_REGION: ${{ github.event.inputs.aws_region }}
-          INPUT_HELM_TLS_ENABLED: ${{ github.event.inputs.helm_tls_enabled }}
-          INPUT_HELM_STORAGE_CLASS: ${{ github.event.inputs.helm_storage_class }}
+          # Export all inputs as environment variables for both Ansible and script usage
+          VAULT_NAMESPACE: ${{ github.event.inputs.namespace }}
+          VAULT_HELM_CHART_VERSION: ${{ github.event.inputs.helm_chart_version }}
+          VAULT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          VAULT_HA_REPLICAS: ${{ github.event.inputs.replicas }}
+          VAULT_UI_ENABLED: ${{ github.event.inputs.ui_enabled }}
+          VAULT_CLOUD_PROVIDER: ${{ github.event.inputs.cloud_provider }}
+          VAULT_AUTO_UNSEAL_METHOD: ${{ github.event.inputs.auto_unseal }}
+          VAULT_AWS_REGION: ${{ github.event.inputs.aws_region }}
+          VAULT_TLS_ENABLED: ${{ github.event.inputs.helm_tls_enabled }}
+          STORAGE_CLASS: ${{ github.event.inputs.helm_storage_class }}
+          VAULT_HA_ENABLED: ${{ (github.event.inputs.replicas == '1' || github.event.inputs.replicas == 1) && 'false' || 'true' }}
+          VAULT_SERVICE_ACCOUNT_NAME: "vault"
+          VAULT_SCC_NAME: "vault-scc"
+          VAULT_HELM_IMAGE_REPOSITORY: "hashicorp/vault"
+          VAULT_HELM_IMAGE_PULL_POLICY: "IfNotPresent"
+          VAULT_INJECTOR_ENABLED: "false"
+          VAULT_AUDIT_LOGS_ENABLED: "false"
 
-          SECRET_OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
-          SECRET_OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
-          SECRET_AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          SECRET_AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          SECRET_VAULT_AWS_KMS_KEY_ID: ${{ secrets.VAULT_AWS_KMS_KEY_ID }}
-          SECRET_AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          SECRET_AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          SECRET_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          SECRET_VAULT_AZURE_KEY_VAULT_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_NAME }}
-          SECRET_VAULT_AZURE_KEY_VAULT_KEY_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_KEY_NAME }}
+          # Secrets for authentication and cloud providers
+          OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+          OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          VAULT_AWS_KMS_KEY_ID: ${{ secrets.VAULT_AWS_KMS_KEY_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          VAULT_AZURE_KEY_VAULT_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_NAME }}
+          VAULT_AZURE_KEY_VAULT_KEY_NAME: ${{ secrets.VAULT_AZURE_KEY_VAULT_KEY_NAME }}
         run: |
-          ansible-playbook ansible/deploy-vault.yaml \
-            -i ansible/inventory/hosts.ini \
-            --extra-vars "target_hosts=localhost" \
-            -e "vault_namespace=${{ env.INPUT_NAMESPACE }}" \
-            -e "vault_helm_chart_version=${{ env.INPUT_HELM_CHART_VERSION }}" \
-            -e "vault_image_tag=${{ env.INPUT_IMAGE_TAG }}" \
-            -e "vault_replicas=${{ env.INPUT_REPLICAS }}" \
-            -e "vault_ui_enabled=${{ env.INPUT_UI_ENABLED }}" \
-            -e "cloud_provider=${{ env.INPUT_CLOUD_PROVIDER }}" \
-            -e "vault_deployment_mode=${{ (env.INPUT_REPLICAS == '1' || env.INPUT_REPLICAS == 1) && 'standalone' || 'ha' }}" \
-            -e "vault_auto_unseal_method=${{ env.INPUT_AUTO_UNSEAL }}" \
-            -e "vault_helm_listener_tls_enabled=${{ env.INPUT_HELM_TLS_ENABLED }}" \
-            -e "cloud_provider_for_helm=${{ env.INPUT_CLOUD_PROVIDER }}" \
-            -e "openshift_server_url=${{ env.SECRET_OPENSHIFT_SERVER }}" \
-            -e "openshift_token=${{ env.SECRET_OPENSHIFT_TOKEN }}" \
-            -e "aws_access_key_id=${{ env.SECRET_AWS_ACCESS_KEY_ID }}" \
-            -e "aws_secret_access_key=${{ env.SECRET_AWS_SECRET_ACCESS_KEY }}" \
-            -e "aws_region=${{ env.INPUT_AWS_REGION }}" \
-            -e "vault_aws_kms_key_id=${{ env.SECRET_VAULT_AWS_KMS_KEY_ID }}" \
-            -e "azure_client_id=${{ env.SECRET_AZURE_CLIENT_ID }}" \
-            -e "azure_client_secret=${{ env.SECRET_AZURE_CLIENT_SECRET }}" \
-            -e "azure_tenant_id=${{ env.SECRET_AZURE_TENANT_ID }}" \
-            -e "vault_azure_key_vault_name=${{ env.SECRET_VAULT_AZURE_KEY_VAULT_NAME }}" \
-            -e "vault_azure_key_vault_key_name=${{ env.SECRET_VAULT_AZURE_KEY_VAULT_KEY_NAME }}" \
-            -e "ansible_python_interpreter=$(which python)"
+          # Create output directory for rendered templates
+          mkdir -p ./rendered_templates
+          
+          # Set up lowercase environment variables for Jinja2 templates
+          export vault_namespace="${VAULT_NAMESPACE}"
+          export vault_scc_name="${VAULT_SCC_NAME}"
+          export vault_service_account_name="${VAULT_SERVICE_ACCOUNT_NAME}"
+          
+          # Make scripts executable
+          chmod +x ./setup_vault_env.sh
+          chmod +x ./deploy_vault_ha_tls_complete.sh
+          
+          # Set up Python virtual environment
+          ./setup_vault_env.sh
+          
+          # Activate virtual environment
+          source venv/bin/activate
+          
+          # Run the refactored deployment script directly
+          # This ensures consistent deployment across local and CI environments
+          ./deploy_vault_ha_tls_complete.sh
 
-      - name: Read Vault Init/Unseal Output from Ansible
+          # Option 2: Use Ansible playbook with the same environment variables
+          # This allows for more complex orchestration if needed
+          # ansible-playbook ansible/deploy-vault.yaml \
+          #   -i ansible/inventory/hosts.ini \
+          #   --extra-vars "target_hosts=localhost" \
+          #   -e "vault_namespace=$VAULT_NAMESPACE" \
+          #   -e "vault_helm_chart_version=$VAULT_HELM_CHART_VERSION" \
+          #   -e "vault_image_tag=$VAULT_IMAGE_TAG" \
+          #   -e "vault_replicas=$VAULT_HA_REPLICAS" \
+          #   -e "vault_ui_enabled=$VAULT_UI_ENABLED" \
+          #   -e "cloud_provider=$VAULT_CLOUD_PROVIDER" \
+          #   -e "vault_deployment_mode=$VAULT_HA_ENABLED" \
+          #   -e "vault_auto_unseal_method=$VAULT_AUTO_UNSEAL_METHOD" \
+          #   -e "vault_helm_listener_tls_enabled=$VAULT_TLS_ENABLED" \
+          #   -e "ansible_python_interpreter=$(which python)"
+
+      - name: Read Vault Init/Unseal Output
         if: ${{ github.event.inputs.auto_unseal == 'none' }}
         id: read_ansible_vault_output
         run: |
-          echo "INFO: Reading Vault initialization data from Ansible role output..."
-          INIT_DATA_FILE="/tmp/vault_gh_output/vault_init_data.json" # As defined in vault_post_config role defaults
-
-          if [ ! -f "$INIT_DATA_FILE" ]; then
-            echo "ERROR: Vault initialization data file '$INIT_DATA_FILE' not found. Ansible role might have failed or did not create it."
-            exit 1
+          echo "INFO: Reading Vault initialization data..."
+          
+          # Check for output from refactored scripts first
+          INIT_DATA_FILE="./rendered_templates/vault-keys.json"
+          KEYS_ENV_FILE="./rendered_templates/vault-keys.env"
+          
+          # Fallback to Ansible output location if not found
+          if [ ! -f "$INIT_DATA_FILE" ] && [ ! -f "$KEYS_ENV_FILE" ]; then
+            INIT_DATA_FILE="/tmp/vault_gh_output/vault_init_data.json"
+            
+            if [ ! -f "$INIT_DATA_FILE" ]; then
+              echo "ERROR: Vault initialization data file not found. Deployment might have failed or did not create it."
+              exit 1
+            fi
           fi
-
+          
           if ! command -v jq &> /dev/null; then
-            echo "ERROR: jq is not installed. Cannot parse init data."
-            exit 1
+            echo "INFO: Installing jq..."
+            apt-get update && apt-get install -y jq
           fi
 
-          INIT_OUTPUT=$(cat "$INIT_DATA_FILE")
-          ROOT_TOKEN=$(echo "$INIT_OUTPUT" | jq -r .root_token 2>/dev/null)
-          UNSEAL_KEYS_B64_JSON=$(echo "$INIT_OUTPUT" | jq -c .unseal_keys_b64 2>/dev/null) # Keep as compact JSON array
-
-          if [ -z "$ROOT_TOKEN" ] || [ "$ROOT_TOKEN" == "null" ] || [ -z "$UNSEAL_KEYS_B64_JSON" ] || [ "$UNSEAL_KEYS_B64_JSON" == "null" ]; then
-            echo "ERROR: Failed to parse root_token or unseal_keys_b64 from $INIT_DATA_FILE."
-            echo "Content of $INIT_DATA_FILE:"
-            cat "$INIT_DATA_FILE"
+          # Extract data based on which file format is available
+          if [ -f "$KEYS_ENV_FILE" ]; then
+            echo "INFO: Reading from vault-keys.env file..."
+            source "$KEYS_ENV_FILE"
+            ROOT_TOKEN="$VAULT_ROOT_TOKEN"
+            
+            # Create an array of unseal keys for consistent processing
+            UNSEAL_KEYS_ARRAY=()
+            for i in {0..4}; do
+              KEY_VAR="VAULT_UNSEAL_KEY_$i"
+              if [ -n "${!KEY_VAR}" ]; then
+                UNSEAL_KEYS_ARRAY+=( "${!KEY_VAR}" )
+              fi
+            done
+          elif [ -f "$INIT_DATA_FILE" ]; then
+            echo "INFO: Reading from JSON init data file..."
+            # Extract data from the JSON file
+            INIT_OUTPUT=$(cat "$INIT_DATA_FILE")
+            ROOT_TOKEN=$(echo "$INIT_OUTPUT" | jq -r .root_token 2>/dev/null)
+            UNSEAL_KEYS_B64_JSON=$(echo "$INIT_OUTPUT" | jq -c .unseal_keys_b64 2>/dev/null) # Keep as compact JSON array
+            
+            if [ -z "$ROOT_TOKEN" ] || [ "$ROOT_TOKEN" == "null" ] || [ -z "$UNSEAL_KEYS_B64_JSON" ] || [ "$UNSEAL_KEYS_B64_JSON" == "null" ]; then
+              echo "ERROR: Failed to parse root_token or unseal_keys_b64 from $INIT_DATA_FILE."
+              echo "Content of $INIT_DATA_FILE:"
+              cat "$INIT_DATA_FILE"
+              exit 1
+            fi
+            
+            # Create an array of unseal keys from the JSON
+            UNSEAL_KEYS_ARRAY=()
+            for i in $(seq 0 4); do # Assuming max 5 keys (0 to 4)
+              key=$(echo "$UNSEAL_KEYS_B64_JSON" | jq -r .[$i] 2>/dev/null)
+              if [ -n "$key" ] && [ "$key" != "null" ]; then
+                UNSEAL_KEYS_ARRAY+=( "$key" )
+              fi
+            done
+          fi
+          
+          if [ -z "$ROOT_TOKEN" ]; then
+            echo "ERROR: Failed to extract root token from init data."
             exit 1
           fi
-
+          
           echo "::add-mask::$ROOT_TOKEN"
           echo "root_token=$ROOT_TOKEN" >> $GITHUB_OUTPUT
-          echo "INFO: Root token captured from Ansible output and masked."
-
-          # Output unseal keys one by one for easier secret management if desired
-          # Max 5 keys are usually generated by Vault init
-          for i in $(seq 0 4); do # Assuming max 5 keys (0 to 4)
-            key=$(echo "$UNSEAL_KEYS_B64_JSON" | jq -r .[$i] 2>/dev/null)
-            if [ -n "$key" ] && [ "$key" != "null" ]; then
+          echo "INFO: Root token captured and masked."
+          
+          # Process unseal keys consistently regardless of source format
+          for i in "${!UNSEAL_KEYS_ARRAY[@]}"; do
+            key="${UNSEAL_KEYS_ARRAY[$i]}"
+            if [ -n "$key" ]; then
               echo "::add-mask::$key"
               echo "unseal_key_$((i+1))=$key" >> $GITHUB_OUTPUT
             else

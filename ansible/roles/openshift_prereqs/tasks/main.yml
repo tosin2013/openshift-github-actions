@@ -124,59 +124,183 @@
     - tls
     - secrets
 
-- name: Generate Vault TLS Certificate Signing Request (CSR)
-  community.crypto.openssl_csr:
-    path: "{{ tls_cert_dir }}/vault.csr"
-    privatekey_path: "{{ tls_cert_dir }}/vault.key"
-    common_name: "{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
-    organization_name: "Vault" # Can be parameterized if needed
-    subject_alt_name:
-      - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc"
-      - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc.cluster.local"
-      - "DNS:*.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
-      - "DNS:*.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
-      - "DNS:{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
-      - "DNS:localhost"
-      - "IP:127.0.0.1"
-    mode: '0644'
-  delegate_to: localhost
-  become: false
+- name: Check if cert-manager is installed
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: certificates.cert-manager.io
+  register: cert_manager_crd
+  failed_when: false
   tags:
     - tls
     - secrets
 
-- name: Generate self-signed Vault TLS certificate
-  community.crypto.x509_certificate:
-    path: "{{ tls_cert_dir }}/vault.crt"
-    csr_path: "{{ tls_cert_dir }}/vault.csr"
-    privatekey_path: "{{ tls_cert_dir }}/vault.key"
-    provider: selfsigned # Creates a self-signed certificate
-    # selfsigned_not_before: "now" # Default is usually current time, removing to test
-    selfsigned_not_after: "+365d" # End validity in 365 days
-    mode: '0644'
-  delegate_to: localhost
-  become: false
+- name: Set fact for cert-manager availability
+  ansible.builtin.set_fact:
+    cert_manager_available: "{{ cert_manager_crd.resources is defined and cert_manager_crd.resources | length > 0 }}"
   tags:
     - tls
     - secrets
 
-- name: Create Kubernetes TLS secret for Vault
-  kubernetes.core.k8s:
-    state: present
-    namespace: "{{ vault_namespace }}"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: "{{ vault_tls_secret_name }}"
+# Path 1: Use cert-manager if available
+- block:
+    - name: Create self-signed Issuer for Vault certificates
+      kubernetes.core.k8s:
+        state: present
         namespace: "{{ vault_namespace }}"
-      type: kubernetes.io/tls
-      data:
-        tls.crt: "{{ lookup('file', tls_cert_dir + '/vault.crt') | b64encode }}"
-        tls.key: "{{ lookup('file', tls_cert_dir + '/vault.key') | b64encode }}"
-  tags:
-    - tls
-    - secrets
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: vault-selfsigned
+            namespace: "{{ vault_namespace }}"
+          spec:
+            selfSigned: {}
+      tags:
+        - tls
+        - secrets
+
+    - name: Create Certificate resource for Vault
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ vault_namespace }}"
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: vault-tls
+            namespace: "{{ vault_namespace }}"
+          spec:
+            secretName: "{{ vault_tls_secret_name }}"
+            duration: 8760h # 1 year
+            renewBefore: 720h # 30 days
+            subject:
+              organizations:
+                - Vault
+            commonName: "{{ vault_common_name_prefix }}"
+            isCA: false
+            privateKey:
+              algorithm: RSA
+              encoding: PKCS1
+              size: 2048
+            usages:
+              - server auth
+              - client auth
+            dnsNames:
+              - "{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc.cluster.local"
+              - "{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+              - "{{ vault_common_name_prefix }}-active.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-active.{{ vault_namespace }}.svc.cluster.local"
+              - "{{ vault_common_name_prefix }}-standby.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-standby.{{ vault_namespace }}.svc.cluster.local"
+              # Individual pod hostnames for Raft cluster communication
+              - "{{ vault_common_name_prefix }}-0.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-0.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+              - "{{ vault_common_name_prefix }}-1.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-1.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+              - "{{ vault_common_name_prefix }}-2.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+              - "{{ vault_common_name_prefix }}-2.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+              # Add more pod hostnames if vault_replicas > 3
+              - "{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
+              - "{{ vault_common_name_prefix }}-ui.{{ openshift_apps_domain_discovered }}"
+              - "localhost"
+            ipAddresses:
+              - "127.0.0.1"
+            issuerRef:
+              name: vault-selfsigned
+              kind: Issuer
+              group: cert-manager.io
+      tags:
+        - tls
+        - secrets
+
+    - name: Wait for Certificate to be ready
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: vault-tls
+        namespace: "{{ vault_namespace }}"
+      register: cert_status
+      until: cert_status.resources[0].status is defined and cert_status.resources[0].status.conditions is defined and cert_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: 10
+      delay: 5
+      tags:
+        - tls
+        - secrets
+  when: cert_manager_available | bool
+
+# Path 2: Fallback to manual certificate generation if cert-manager is not available
+- block:
+    - name: Generate Vault TLS Certificate Signing Request (CSR)
+      community.crypto.openssl_csr:
+        path: "{{ tls_cert_dir }}/vault.csr"
+        privatekey_path: "{{ tls_cert_dir }}/vault.key"
+        # Use a shorter common name to avoid exceeding the 64 character limit
+        common_name: "{{ vault_common_name_prefix }}"
+        organization_name: "Vault" # Can be parameterized if needed
+        subject_alt_name:
+          - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}.{{ vault_namespace }}.svc.cluster.local"
+          - "DNS:{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+          - "DNS:{{ vault_common_name_prefix }}-active.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-active.{{ vault_namespace }}.svc.cluster.local"
+          - "DNS:{{ vault_common_name_prefix }}-standby.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-standby.{{ vault_namespace }}.svc.cluster.local"
+          # Individual pod hostnames for Raft cluster communication
+          - "DNS:{{ vault_common_name_prefix }}-0.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-0.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+          - "DNS:{{ vault_common_name_prefix }}-1.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-1.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+          - "DNS:{{ vault_common_name_prefix }}-2.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc"
+          - "DNS:{{ vault_common_name_prefix }}-2.{{ vault_common_name_prefix }}-internal.{{ vault_namespace }}.svc.cluster.local"
+          # Add more pod hostnames if vault_replicas > 3
+          - "DNS:{{ vault_common_name_prefix }}.{{ openshift_apps_domain_discovered }}"
+          - "DNS:{{ vault_common_name_prefix }}-ui.{{ openshift_apps_domain_discovered }}"
+          - "DNS:localhost"
+          - "IP:127.0.0.1"
+        mode: '0644'
+      delegate_to: localhost
+      become: false
+      tags:
+        - tls
+        - secrets
+
+    - name: Generate self-signed Vault TLS certificate
+      community.crypto.x509_certificate:
+        path: "{{ tls_cert_dir }}/vault.crt"
+        csr_path: "{{ tls_cert_dir }}/vault.csr"
+        privatekey_path: "{{ tls_cert_dir }}/vault.key"
+        provider: selfsigned # Creates a self-signed certificate
+        # selfsigned_not_before: "now" # Default is usually current time, removing to test
+        selfsigned_not_after: "+365d" # End validity in 365 days
+        mode: '0644'
+      delegate_to: localhost
+      become: false
+      tags:
+        - tls
+        - secrets
+
+    - name: Create Kubernetes TLS secret for Vault
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ vault_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ vault_tls_secret_name }}"
+            namespace: "{{ vault_namespace }}"
+          type: kubernetes.io/tls
+          data:
+            tls.crt: "{{ lookup('file', tls_cert_dir + '/vault.crt') | b64encode }}"
+            tls.key: "{{ lookup('file', tls_cert_dir + '/vault.key') | b64encode }}"
+      tags:
+        - tls
+        - secrets
+  when: not cert_manager_available | bool
 
 - name: Ensure conflicting ClusterRoleBinding vault-server-binding is absent
   kubernetes.core.k8s: # Updated FQCN

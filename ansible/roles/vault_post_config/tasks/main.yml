@@ -51,7 +51,7 @@
       {{ _vault_post_config_oc_executable }} exec {{ _vault_0_pod_name }} 
       -n "{{ vault_post_config_namespace }}" 
       -c "{{ _vault_post_config_container_name }}" -- 
-      sh -c "VAULT_SKIP_VERIFY={{ _vault_exec_skip_verify }} VAULT_ADDR={{ _vault_exec_addr }} vault status -format=json"
+      sh -c "VAULT_SKIP_VERIFY=True VAULT_ADDR=https://127.0.0.1:8200 vault status -format=json -tls-skip-verify"
   register: vault_status_check_vault_0
   changed_when: false
   failed_when: vault_status_check_vault_0.rc not in [0, 2] # rc 0 is OK, rc 2 means not initialized or sealed
@@ -149,3 +149,12 @@
     - "(_vault_init_data is defined and _vault_init_data.unseal_keys_b64 is defined) or (_vault_post_config_provided_unseal_keys | length > 0)"
   tags:
     - vault_post_config_unseal_ha
+    
+# Verify Raft cluster status and create UI route
+- name: Verify Raft cluster status and setup UI access
+  ansible.builtin.include_tasks: verify_raft_cluster.yml
+  when:
+    - "_vault_post_config_replicas | int > 1"
+    - "(_vault_init_data is defined and _vault_init_data.root_token is defined) or vault_root_token is defined"
+  tags:
+    - vault_post_config_verify

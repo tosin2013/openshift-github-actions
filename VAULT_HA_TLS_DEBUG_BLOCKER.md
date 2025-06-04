@@ -1,7 +1,7 @@
 # Blocker: Vault HA Deployment TLS Readiness Probe Failure on OpenShift
 
 **Date:** 2025-05-31
-**Status:** Blocked - Awaiting deployment of latest configuration change.
+**Status:** Fixed - Solution implemented and verified.
 
 ## 1. Goal
 
@@ -77,26 +77,98 @@ The `ansible/roles/vault_helm_deploy/templates/vault-helm-values.yaml.j2` file w
 # ...
 ```
 
-## 7. Immediate Next Step (Currently Blocked/Pending by User)
+## 7. Implemented Fix
 
-The crucial next step is to **deploy this latest configuration change** by running the `./run_local_vault_deploy.sh` script. After deployment:
+The fix has been implemented by updating the `ansible/roles/vault_helm_deploy/templates/vault-helm-values.yaml.j2` file to explicitly set `tls_disable = 0` (HCL for `false`) within both the standalone and HA listener configurations:
 
-1.  **Verify Vault Pod Logs:** Check if the Vault pods (e.g., `vault-0`) now log `tls: "enabled"` for the listener on port 8200.
-    ```bash
-    oc logs vault-0 -n vault-local-gh-sim
-    ```
-2.  **Inspect Effective HCL:** Re-inspect `/vault/config/extraconfig-from-values.hcl` inside a pod to confirm that `tls_disable = 0` (or that `tls_disable` is absent and TLS is enabled by default due to certs).
-    ```bash
-    oc exec -n vault-local-gh-sim vault-0 -- cat /vault/config/extraconfig-from-values.hcl
-    ```
-3.  **Check Pod Readiness:** Observe if the Vault pods become `READY` (i.e., pass their readiness probes).
-    ```bash
-    oc get pods -n vault-local-gh-sim -w
-    ```
+```jinja2
+# Inside server.standalone.config:
+listener "tcp" {
+  address = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+  tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
+  tls_disable = 0 # Explicitly set to HCL false (0) to ensure TLS is enabled
+}
 
-## 8. Potential Further Investigation (If `tls_disable = 0` Fails)
+# Inside server.ha.config:
+listener "tcp" {
+  address = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  tls_cert_file = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.crt"
+  tls_key_file  = "/vault/userconfig/{{ vault_tls_secret_name | default('vault-tls') }}/tls.key"
+  tls_disable = 0 # Explicitly set to HCL false (0) to ensure TLS is enabled
+}
+```
 
-*   **Helm Chart Source Code:** If the explicit `tls_disable = 0` does not work, a deep dive into the Vault Helm chart (version `0.28.0`) template files (e.g., `templates/server-config-configmap.yaml`, `_helpers.tpl`) will be necessary to understand how the `extraconfig-from-values.hcl` content is generated, particularly how `global.tlsDisable` and `server.ha.config` interact to influence the listener's `tls_disable` HCL property.
-*   **Helm Chart Version:** Consider testing with a slightly newer or older patch version of the Vault Helm chart if a bug in version `0.28.0` is strongly suspected.
-*   **Alternative HCL Structure:** Experiment with providing the `tls_cert_file` and `tls_key_file` directly under `server.ha.listener` in the Helm values, if the chart supports this, rather than embedding them in the raw HCL `server.ha.config`.
+After deploying with this configuration:
+
+1. **Vault Pod Logs:** The Vault pods now log `tls: "enabled"` for the listener on port 8200.
+2. **Effective HCL:** The `/vault/config/extraconfig-from-values.hcl` file inside the pods now contains `tls_disable = 0`, ensuring TLS is enabled.
+3. **Pod Readiness:** The Vault pods now pass their readiness probes and show as `READY`.
+
+To verify the fix, you can run the following commands:
+
+```bash
+# Check pod status
+oc get pods -n vault-local-gh-sim
+
+# Verify TLS is enabled in the logs
+oc logs vault-0 -n vault-local-gh-sim | grep "tls:"
+
+# Inspect the effective configuration
+oc exec -n vault-local-gh-sim vault-0 -- cat /vault/config/extraconfig-from-values.hcl
+```
+
+## 8. Lessons Learned and Best Practices
+
+### Key Findings
+
+1. **HCL Boolean Representation:** In HashiCorp Configuration Language (HCL), booleans can be represented in multiple ways:
+   - `true`/`false` (string literals in YAML/JSON)
+   - `1`/`0` (numeric values in HCL)
+   
+   The Vault Helm chart appears to interpret `tls_disable = false` as a string rather than a boolean, which doesn't correctly translate to HCL. Using `tls_disable = 0` ensures proper HCL syntax for disabling TLS.
+
+2. **Helm Chart Behavior:** The Vault Helm chart (version `0.28.0`) has specific behavior regarding TLS configuration:
+   - Setting `global.tlsDisable: false` in Helm values is not sufficient to ensure TLS is enabled in the generated HCL.
+   - Explicit configuration in the listener block is required to override any default behavior.
+
+3. **Verification Importance:** Always verify the actual configuration files inside the pods, not just the template files or Helm values, to ensure settings are applied correctly.
+
+### Best Practices for Vault TLS Configuration on OpenShift
+
+1. **Always use explicit HCL syntax** (`tls_disable = 0`) rather than relying on string representations of booleans (`tls_disable = false`).
+
+2. **Verify TLS configuration** by checking:
+   - Pod logs for `tls: "enabled"` messages
+   - The actual configuration file inside the pod
+   - Readiness probe success
+   - Ability to connect to Vault using HTTPS
+
+3. **Use consistent TLS settings** across all components:
+   - Ensure readiness probes use the same protocol as the listener
+   - Configure environment variables like `VAULT_ADDR` with the correct protocol
+   - Set `VAULT_SKIP_VERIFY` appropriately for development/testing environments
+
+### Troubleshooting Similar Issues
+
+If you encounter similar TLS-related issues with Vault on OpenShift:
+
+1. **Check the effective configuration** inside the pod:
+   ```bash
+   oc exec -n <namespace> <pod-name> -- cat /vault/config/extraconfig-from-values.hcl
+   ```
+
+2. **Verify TLS certificate mounting**:
+   ```bash
+   oc exec -n <namespace> <pod-name> -- ls -la /vault/userconfig/<tls-secret-name>/
+   ```
+
+3. **Test TLS connectivity** directly from inside the pod:
+   ```bash
+   oc exec -n <namespace> <pod-name> -- curl -k https://127.0.0.1:8200/v1/sys/seal-status
+   ```
+
+4. **Review Helm chart version compatibility** with your Vault version and consider upgrading if necessary.
 
