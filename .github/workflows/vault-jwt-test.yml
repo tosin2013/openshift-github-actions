@@ -13,6 +13,10 @@ on:
           - oc-exec
           - both
 
+permissions:
+  id-token: write   # Required for OIDC token generation (JWT authentication)
+  contents: read    # Required for repository access
+
 env:
   VAULT_NAMESPACE: vault-test-pragmatic
 
