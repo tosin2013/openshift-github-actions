@@ -138,7 +138,19 @@ jobs:
               echo "✅ Credentials extracted successfully"
               echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY" >> $GITHUB_ENV
               echo "AWS_SECRET_ACCESS_KEY=$SECRET_KEY" >> $GITHUB_ENV
-              echo "status=CREDENTIALS_SUCCESS" >> $GITHUB_OUTPUT
+
+              # Wait for AWS propagation (new IAM users need time to become active)
+              echo "⏳ Waiting 30 seconds for AWS IAM user propagation..."
+              sleep 30
+
+              # Test AWS credentials after propagation delay
+              if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
+                echo "✅ AWS credentials validated after propagation delay"
+                echo "status=CREDENTIALS_SUCCESS" >> $GITHUB_OUTPUT
+              else
+                echo "❌ AWS credentials validation failed even after propagation delay"
+                echo "status=VALIDATION_FAILED" >> $GITHUB_OUTPUT
+              fi
             else
               echo "❌ Credential extraction failed"
               echo "status=EXTRACTION_FAILED" >> $GITHUB_OUTPUT
@@ -167,7 +179,11 @@ jobs:
           case "$status" in
             "CREDENTIALS_SUCCESS")
               score=100
-              echo "✅ OC Exec approach: PERFECT SCORE"
+              echo "✅ OC Exec approach: PERFECT SCORE (AWS validation passed)"
+              ;;
+            "VALIDATION_FAILED")
+              score=80
+              echo "⚠️ OC Exec approach: Credentials generated but AWS validation failed"
               ;;
             "EXTRACTION_FAILED")
               score=70
