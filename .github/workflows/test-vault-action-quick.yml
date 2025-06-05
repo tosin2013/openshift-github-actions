@@ -1,0 +1,223 @@
+name: Quick Vault Action Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_method:
+        description: 'Test method to use'
+        required: true
+        default: 'vault-action'
+        type: choice
+        options:
+          - vault-action
+          - oc-exec
+          - both
+
+env:
+  VAULT_NAMESPACE: vault-test-pragmatic
+
+jobs:
+  test-vault-action:
+    if: ${{ github.event.inputs.test_method == 'vault-action' || github.event.inputs.test_method == 'both' }}
+    runs-on: ubuntu-latest
+    outputs:
+      vault_action_score: ${{ steps.score.outputs.score }}
+      vault_action_status: ${{ steps.test.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Vault Action Authentication
+        id: test
+        continue-on-error: true
+        uses: hashicorp/vault-action@v2
+        with:
+          url: https://vault-vault-test-pragmatic.apps.cluster-67wft.67wft.sandbox1936.opentlc.com
+          method: jwt
+          jwtGithubAudience: https://github.com/tosin2013
+          role: github-actions-openshift
+          secrets: |
+            aws/creds/openshift-installer access_key | AWS_ACCESS_KEY_ID ;
+            aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY
+
+      - name: Validate AWS Credentials (if vault-action worked)
+        if: steps.test.outcome == 'success'
+        run: |
+          echo "Testing AWS credentials from vault-action..."
+          aws sts get-caller-identity --region us-east-2 || echo "AWS validation failed"
+
+      - name: Calculate Vault Action Score
+        id: score
+        run: |
+          score=0
+          status="FAILED"
+          
+          if [[ "${{ steps.test.outcome }}" == "success" ]]; then
+            echo "✅ Vault Action authentication successful"
+            score=$((score + 50))
+            status="SUCCESS"
+            
+            # Check if AWS credentials were set
+            if [[ -n "$AWS_ACCESS_KEY_ID" ]]; then
+              echo "✅ AWS credentials retrieved"
+              score=$((score + 30))
+              
+              # Test AWS credentials
+              if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
+                echo "✅ AWS credentials validated"
+                score=$((score + 20))
+              else
+                echo "❌ AWS credentials validation failed"
+              fi
+            else
+              echo "❌ AWS credentials not retrieved"
+            fi
+          else
+            echo "❌ Vault Action authentication failed"
+          fi
+          
+          echo "Vault Action Score: $score/100"
+          echo "score=$score" >> $GITHUB_OUTPUT
+          echo "status=$status" >> $GITHUB_OUTPUT
+
+  test-oc-exec:
+    if: ${{ github.event.inputs.test_method == 'oc-exec' || github.event.inputs.test_method == 'both' }}
+    runs-on: ubuntu-latest
+    outputs:
+      oc_exec_score: ${{ steps.score.outputs.score }}
+      oc_exec_status: ${{ steps.test.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.18'
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+
+      - name: Test OC Exec Vault Access
+        id: test
+        continue-on-error: true
+        run: |
+          echo "Testing oc exec approach..."
+          
+          # Test basic connectivity
+          if oc exec vault-0 -n vault-test-pragmatic -- vault status; then
+            echo "✅ Basic Vault connectivity successful"
+            echo "status=CONNECTIVITY_SUCCESS" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Basic Vault connectivity failed"
+            echo "status=CONNECTIVITY_FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Test credential generation (using root token from secrets)
+          echo "Testing credential generation..."
+          CREDS=$(oc exec vault-0 -n vault-test-pragmatic -- sh -c "
+            export VAULT_ADDR=https://localhost:8200
+            export VAULT_SKIP_VERIFY=true
+            export VAULT_TOKEN=${{ secrets.VAULT_ROOT_TOKEN }}
+            vault read aws/creds/openshift-installer -format=json
+          " 2>/dev/null)
+          
+          if [[ $? -eq 0 && -n "$CREDS" ]]; then
+            echo "✅ Credential generation successful"
+            
+            # Extract credentials
+            ACCESS_KEY=$(echo "$CREDS" | jq -r '.data.access_key')
+            SECRET_KEY=$(echo "$CREDS" | jq -r '.data.secret_key')
+            
+            if [[ "$ACCESS_KEY" != "null" && "$SECRET_KEY" != "null" ]]; then
+              echo "✅ Credentials extracted successfully"
+              echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY" >> $GITHUB_ENV
+              echo "AWS_SECRET_ACCESS_KEY=$SECRET_KEY" >> $GITHUB_ENV
+              echo "status=CREDENTIALS_SUCCESS" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Credential extraction failed"
+              echo "status=EXTRACTION_FAILED" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "❌ Credential generation failed"
+            echo "status=GENERATION_FAILED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate AWS Credentials (if oc-exec worked)
+        if: steps.test.outputs.status == 'CREDENTIALS_SUCCESS'
+        run: |
+          echo "Testing AWS credentials from oc exec..."
+          if aws sts get-caller-identity --region us-east-2; then
+            echo "✅ AWS credentials validated successfully"
+          else
+            echo "❌ AWS credentials validation failed"
+          fi
+
+      - name: Calculate OC Exec Score
+        id: score
+        run: |
+          score=0
+          status="${{ steps.test.outputs.status }}"
+          
+          case "$status" in
+            "CREDENTIALS_SUCCESS")
+              score=100
+              echo "✅ OC Exec approach: PERFECT SCORE"
+              ;;
+            "EXTRACTION_FAILED")
+              score=70
+              echo "⚠️ OC Exec approach: Connectivity good, extraction issues"
+              ;;
+            "GENERATION_FAILED")
+              score=50
+              echo "⚠️ OC Exec approach: Connectivity good, generation issues"
+              ;;
+            "CONNECTIVITY_FAILED")
+              score=0
+              echo "❌ OC Exec approach: Basic connectivity failed"
+              ;;
+            *)
+              score=0
+              echo "❌ OC Exec approach: Unknown status"
+              ;;
+          esac
+          
+          echo "OC Exec Score: $score/100"
+          echo "score=$score" >> $GITHUB_OUTPUT
+
+  compare-results:
+    if: ${{ github.event.inputs.test_method == 'both' }}
+    needs: [test-vault-action, test-oc-exec]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare Approaches
+        run: |
+          echo "=== VAULT INTEGRATION COMPARISON ==="
+          echo ""
+          echo "Vault Action Approach:"
+          echo "  Status: ${{ needs.test-vault-action.outputs.vault_action_status }}"
+          echo "  Score:  ${{ needs.test-vault-action.outputs.vault_action_score }}/100"
+          echo ""
+          echo "OC Exec Approach:"
+          echo "  Status: ${{ needs.test-oc-exec.outputs.oc_exec_status }}"
+          echo "  Score:  ${{ needs.test-oc-exec.outputs.oc_exec_score }}/100"
+          echo ""
+          
+          vault_score=${{ needs.test-vault-action.outputs.vault_action_score }}
+          oc_score=${{ needs.test-oc-exec.outputs.oc_exec_score }}
+          
+          if [[ $oc_score -gt $vault_score ]]; then
+            echo "🏆 WINNER: OC Exec approach (Score: $oc_score vs $vault_score)"
+            echo "RECOMMENDATION: Use proven oc exec pattern for production"
+          elif [[ $vault_score -gt $oc_score ]]; then
+            echo "🏆 WINNER: Vault Action approach (Score: $vault_score vs $oc_score)"
+            echo "RECOMMENDATION: Use vault-action@v2 for production"
+          else
+            echo "🤝 TIE: Both approaches scored equally ($vault_score/100)"
+            echo "RECOMMENDATION: Choose based on operational preferences"
+          fi
