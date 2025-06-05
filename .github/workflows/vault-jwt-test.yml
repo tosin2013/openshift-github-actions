@@ -40,6 +40,7 @@ jobs:
           method: jwt
           jwtGithubAudience: ${{ secrets.VAULT_JWT_AUDIENCE }}
           role: ${{ secrets.VAULT_ROLE }}
+          tlsSkipVerify: true
           secrets: |
             aws/creds/openshift-installer access_key | AWS_ACCESS_KEY_ID ;
             aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY
