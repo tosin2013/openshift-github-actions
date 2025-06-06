@@ -132,6 +132,8 @@ validate_required_params() {
   if [ "$OPERATION" = "deploy" ]; then
     if [ -z "$BASE_DOMAIN" ]; then
       errors+=("Base domain is required for deployment")
+    elif [ "$BASE_DOMAIN" = "vault-managed" ]; then
+      log "INFO" "Base domain will be retrieved from Vault"
     fi
 
     if [ -z "$NODE_COUNT" ]; then
@@ -306,7 +308,7 @@ validate_common_params() {
   fi
 
   # Validate base domain for deployment
-  if [ "$OPERATION" = "deploy" ] && ! validate_base_domain "$BASE_DOMAIN"; then
+  if [ "$OPERATION" = "deploy" ] && [ "$BASE_DOMAIN" != "vault-managed" ] && ! validate_base_domain "$BASE_DOMAIN"; then
     errors+=("Invalid base domain format")
   fi
 
