@@ -39,9 +39,7 @@ permissions:
 
 env:
   VAULT_NAMESPACE: vault-test-pragmatic
-  CLUSTER_BASE_DOMAIN: sandbox1936.opentlc.com
   OPENSHIFT_VERSION: "4.18"
-  AWS_REGION: "us-east-1"
 
 jobs:
   validate-prerequisites:
@@ -156,7 +154,7 @@ jobs:
           echo "⏳ Waiting 30 seconds for AWS IAM user propagation before initial validation..."
           sleep 30
 
-          if aws sts get-caller-identity --region ${{ env.AWS_REGION }}; then
+          if aws sts get-caller-identity --region ${{ secrets.AWS_REGION }}; then
             echo "✅ AWS credentials validated successfully"
             echo "status=success" >> $GITHUB_OUTPUT
           else
@@ -171,7 +169,7 @@ jobs:
           echo "🚀 Deploying OpenShift cluster on AWS..."
           echo "Cluster Name: ${{ github.event.inputs.cluster_name }}"
           echo "Environment: ${{ github.event.inputs.environment }}"
-          echo "Base Domain: ${{ env.CLUSTER_BASE_DOMAIN }}"
+          echo "Base Domain: ${{ secrets.CLUSTER_BASE_DOMAIN }}"
           echo "Dry Run: ${{ github.event.inputs.dry_run }}"
 
           if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
@@ -195,9 +193,9 @@ jobs:
     uses: ./.github/workflows/deploy-aws.yml
     with:
       cluster_name: ${{ github.event.inputs.cluster_name }}
-      region: ${{ env.AWS_REGION }}
+      region: ${{ secrets.AWS_REGION }}
       environment: ${{ github.event.inputs.environment }}
-      base_domain: ${{ env.CLUSTER_BASE_DOMAIN }}
+      base_domain: ${{ secrets.CLUSTER_BASE_DOMAIN }}
     secrets:
       VAULT_URL: ${{ secrets.VAULT_URL }}
       VAULT_JWT_AUDIENCE: ${{ secrets.VAULT_JWT_AUDIENCE }}
