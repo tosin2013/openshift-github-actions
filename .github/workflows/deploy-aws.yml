@@ -149,7 +149,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -241,14 +241,14 @@ jobs:
 
       - name: Upload installation logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: aws-installation-logs-${{ env.CLUSTER_NAME }}
           path: installation-dir/.openshift_install.log
 
       - name: Upload kubeconfig
         if: success()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: aws-kubeconfig-${{ env.CLUSTER_NAME }}
           path: installation-dir/auth/kubeconfig
