@@ -93,6 +93,45 @@ check_vault_status() {
     return 0
 }
 
+# Function to add base domain configuration
+add_base_domain() {
+    local environment="${1:-dev}"
+    log "Adding base domain configuration for environment: $environment"
+
+    # Check if base domain already exists
+    if oc exec $VAULT_POD -n $VAULT_NAMESPACE -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv get secret/openshift/config/$environment &>/dev/null; then
+        warn "Base domain configuration for $environment already exists in Vault"
+        read -p "Do you want to update it? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log "Skipping base domain configuration update"
+            return 0
+        fi
+    fi
+
+    echo
+    echo "Please provide the base domain for $environment environment."
+    echo "Examples: sandbox1936.opentlc.com, sandbox3223.opentlc.com, your-domain.com"
+    echo
+    read -p "Enter base domain for $environment (default: sandbox3223.opentlc.com): " -r BASE_DOMAIN
+
+    # Use default if empty
+    if [[ -z "$BASE_DOMAIN" ]]; then
+        BASE_DOMAIN="sandbox3223.opentlc.com"
+    fi
+
+    log "Using base domain: $BASE_DOMAIN for environment: $environment"
+
+    # Add to Vault
+    if oc exec $VAULT_POD -n $VAULT_NAMESPACE -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv put secret/openshift/config/$environment base_domain="$BASE_DOMAIN"; then
+        success "Base domain configuration added to Vault successfully"
+        log "Environment: $environment -> Base Domain: $BASE_DOMAIN"
+    else
+        error "Failed to add base domain configuration to Vault"
+        return 1
+    fi
+}
+
 # Function to add pull secret
 add_pull_secret() {
     log "Adding OpenShift pull secret to Vault..."
@@ -219,6 +258,17 @@ verify_secrets() {
         error "❌ SSH keys for dev environment missing"
         all_good=false
     fi
+
+    # Check base domain configuration for dev environment
+    if oc exec $VAULT_POD -n $VAULT_NAMESPACE -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv get secret/openshift/config/dev &>/dev/null; then
+        success "✅ Base domain configuration for dev environment exists"
+        # Show the configured domain
+        local configured_domain=$(oc exec $VAULT_POD -n $VAULT_NAMESPACE -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv get -field=base_domain secret/openshift/config/dev 2>/dev/null || echo "unknown")
+        log "   Configured domain: $configured_domain"
+    else
+        error "❌ Base domain configuration for dev environment missing"
+        all_good=false
+    fi
     
     if $all_good; then
         success "All required secrets are present in Vault!"
@@ -241,6 +291,7 @@ main() {
     # Add secrets
     add_pull_secret
     add_ssh_keys "dev"
+    add_base_domain "dev"
     
     # Verify all secrets
     verify_secrets

@@ -46,6 +46,7 @@ on:
       base_domain:
         description: 'Base Domain'
         required: true
+        default: 'sandbox1936.opentlc.com'
         type: string
       environment:
         description: 'Environment'
@@ -171,7 +172,8 @@ jobs:
             aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY ;
             secret/data/openshift/pull-secret pullSecret | PULL_SECRET ;
             secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} private_key | SSH_PRIVATE_KEY ;
-            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} public_key | SSH_PUBLIC_KEY
+            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} public_key | SSH_PUBLIC_KEY ;
+            secret/data/openshift/config/${{ env.ENVIRONMENT }} base_domain | VAULT_BASE_DOMAIN
 
       - name: Install OpenShift CLI
         run: |
@@ -198,6 +200,17 @@ jobs:
           # Verify installation
           ~/bin/oc version --client
           ~/bin/openshift-install version
+
+      - name: Set base domain from Vault
+        run: |
+          # Use Vault base domain if available, otherwise use input parameter
+          if [[ -n "$VAULT_BASE_DOMAIN" ]]; then
+            echo "Using base domain from Vault: $VAULT_BASE_DOMAIN"
+            echo "BASE_DOMAIN=$VAULT_BASE_DOMAIN" >> $GITHUB_ENV
+          else
+            echo "Using base domain from input: ${{ env.BASE_DOMAIN }}"
+          fi
+          echo "Final base domain: $BASE_DOMAIN"
 
       - name: Validate AWS credentials
         run: |

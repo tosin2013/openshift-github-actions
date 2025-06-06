@@ -33,7 +33,7 @@ on:
         default: false
         type: boolean
       openshift_version:
-        description: 'OpenShift Version'
+        description: 'OpenShift Version -> https://mirror.openshift.com/pub/openshift-v4/clients/ocp/'
         required: true
         default: '4.18.17'
         type: string
@@ -159,7 +159,7 @@ jobs:
           echo "⏳ Waiting 30 seconds for AWS IAM user propagation before initial validation..."
           sleep 30
 
-          if aws sts get-caller-identity --region ${{ secrets.AWS_REGION }}; then
+          if aws sts get-caller-identity --region us-east-1; then
             echo "✅ AWS credentials validated successfully"
             echo "status=success" >> $GITHUB_OUTPUT
           else
@@ -174,7 +174,7 @@ jobs:
           echo "🚀 Deploying OpenShift cluster on AWS..."
           echo "Cluster Name: ${{ github.event.inputs.cluster_name }}"
           echo "Environment: ${{ github.event.inputs.environment }}"
-          echo "Base Domain: ${{ secrets.CLUSTER_BASE_DOMAIN }}"
+          echo "Base Domain: (managed by Vault)"
           echo "Dry Run: ${{ github.event.inputs.dry_run }}"
 
           if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
@@ -200,7 +200,7 @@ jobs:
       cluster_name: ${{ github.event.inputs.cluster_name }}
       region: "us-east-1"
       environment: ${{ github.event.inputs.environment }}
-      base_domain: "sandbox1936.opentlc.com"
+      base_domain: "vault-managed"
       openshift_version: ${{ github.event.inputs.openshift_version }}
     secrets:
       VAULT_URL: ${{ secrets.VAULT_URL }}
