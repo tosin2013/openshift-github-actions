@@ -145,8 +145,8 @@ jobs:
               echo "AWS_SECRET_ACCESS_KEY=$SECRET_KEY" >> $GITHUB_ENV
 
               # Wait for AWS propagation (new IAM users need time to become active)
-              echo "⏳ Waiting 30 seconds for AWS IAM user propagation..."
-              sleep 30
+              echo "⏳ Waiting 60 seconds for AWS IAM user propagation..."
+              sleep 60
 
               # Test AWS credentials after propagation delay
               if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
