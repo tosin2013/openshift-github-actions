@@ -136,48 +136,31 @@ jobs:
           openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
           insecure_skip_tls_verify: true
 
-      - name: Generate AWS Credentials from Vault
+      - name: Generate AWS Credentials from Vault (JWT Approach)
         id: aws_creds
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_URL }}
+          method: jwt
+          jwtGithubAudience: ${{ secrets.VAULT_JWT_AUDIENCE }}
+          role: ${{ secrets.VAULT_ROLE }}
+          tlsSkipVerify: true
+          secrets: |
+            aws/creds/openshift-installer access_key | AWS_ACCESS_KEY_ID ;
+            aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY
+
+      - name: Validate AWS Credentials
         run: |
-          echo "Generating AWS credentials from Vault..."
-          
-          CREDS=$(oc exec vault-0 -n ${{ env.VAULT_NAMESPACE }} -- sh -c "
-            export VAULT_ADDR=https://localhost:8200
-            export VAULT_SKIP_VERIFY=true
-            export VAULT_TOKEN=${{ secrets.VAULT_ROOT_TOKEN }}
-            vault read aws/creds/openshift-installer -format=json
-          " 2>/dev/null)
-          
-          if [[ $? -eq 0 && -n "$CREDS" ]]; then
-            ACCESS_KEY=$(echo "$CREDS" | jq -r '.data.access_key')
-            SECRET_KEY=$(echo "$CREDS" | jq -r '.data.secret_key')
-            
-            if [[ "$ACCESS_KEY" != "null" && "$SECRET_KEY" != "null" ]]; then
-              echo "✅ AWS credentials generated successfully"
-              echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY" >> $GITHUB_ENV
-              echo "AWS_SECRET_ACCESS_KEY=$SECRET_KEY" >> $GITHUB_ENV
-              
-              # Wait for AWS propagation
-              echo "⏳ Waiting 60 seconds for AWS IAM user propagation..."
-              sleep 60
-              
-              # Validate credentials
-              if aws sts get-caller-identity --region us-east-1 >/dev/null 2>&1; then
-                echo "✅ AWS credentials validated"
-                echo "status=success" >> $GITHUB_OUTPUT
-              else
-                echo "❌ AWS credentials validation failed"
-                echo "status=validation_failed" >> $GITHUB_OUTPUT
-                exit 1
-              fi
-            else
-              echo "❌ Failed to extract AWS credentials"
-              echo "status=extraction_failed" >> $GITHUB_OUTPUT
-              exit 1
-            fi
+          echo "Testing AWS credentials from vault-action..."
+          echo "⏳ Waiting 30 seconds for AWS IAM user propagation before initial validation..."
+          sleep 30
+
+          if aws sts get-caller-identity --region us-east-1; then
+            echo "✅ AWS credentials validated successfully"
+            echo "status=success" >> $GITHUB_OUTPUT
           else
-            echo "❌ Failed to generate AWS credentials"
-            echo "status=generation_failed" >> $GITHUB_OUTPUT
+            echo "❌ AWS credentials validation failed"
+            echo "status=validation_failed" >> $GITHUB_OUTPUT
             exit 1
           fi
 
