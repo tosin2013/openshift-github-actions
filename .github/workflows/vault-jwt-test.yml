@@ -12,6 +12,18 @@ on:
           - vault-action
           - oc-exec
           - both
+      aws_region:
+        description: 'AWS Region for testing'
+        required: true
+        default: 'us-east-1'
+        type: choice
+        options:
+          - us-east-1
+          - us-east-2
+          - us-west-1
+          - us-west-2
+          - eu-west-1
+          - eu-central-1
 
 permissions:
   id-token: write   # Required for OIDC token generation (JWT authentication)
@@ -48,7 +60,7 @@ jobs:
         if: steps.test.outcome == 'success'
         run: |
           echo "Testing AWS credentials from vault-action..."
-          aws sts get-caller-identity --region us-east-2 || echo "AWS validation failed"
+          aws sts get-caller-identity --region ${{ github.event.inputs.aws_region }} || echo "AWS validation failed"
 
       - name: Calculate Vault Action Score
         id: score
@@ -71,7 +83,7 @@ jobs:
               sleep 60
 
               # Test AWS credentials after propagation delay
-              if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
+              if aws sts get-caller-identity --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
                 echo "✅ AWS credentials validated after propagation delay"
                 score=$((score + 20))
               else
@@ -153,7 +165,7 @@ jobs:
               sleep 60
 
               # Test AWS credentials after propagation delay
-              if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
+              if aws sts get-caller-identity --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
                 echo "✅ AWS credentials validated after propagation delay"
                 echo "status=CREDENTIALS_SUCCESS" >> $GITHUB_OUTPUT
               else
@@ -175,7 +187,7 @@ jobs:
         if: steps.test.outputs.status == 'CREDENTIALS_SUCCESS'
         run: |
           echo "Testing AWS credentials from oc exec..."
-          if aws sts get-caller-identity --region us-east-2; then
+          if aws sts get-caller-identity --region ${{ github.event.inputs.aws_region }}; then
             echo "✅ AWS credentials validated successfully"
           else
             echo "❌ AWS credentials validation failed"
@@ -225,6 +237,7 @@ jobs:
       - name: Compare Approaches
         run: |
           echo "=== VAULT INTEGRATION COMPARISON ==="
+          echo "AWS Region: ${{ github.event.inputs.aws_region }}"
           echo ""
 
           # Check job results
