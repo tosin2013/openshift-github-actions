@@ -200,7 +200,7 @@ jobs:
       cluster_name: ${{ github.event.inputs.cluster_name }}
       region: "us-east-1"
       environment: ${{ github.event.inputs.environment }}
-      base_domain: "sandbox1936.opentlc.com"
+      base_domain: ${{ secrets.CLUSTER_BASE_DOMAIN }}"
       openshift_version: ${{ github.event.inputs.openshift_version }}
     secrets:
       VAULT_URL: ${{ secrets.VAULT_URL }}
