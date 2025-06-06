@@ -198,7 +198,7 @@ jobs:
     uses: ./.github/workflows/deploy-aws.yml
     with:
       cluster_name: ${{ github.event.inputs.cluster_name }}
-      region: "us-east-1"
+      region: "us-east-2"
       environment: ${{ github.event.inputs.environment }}
       openshift_version: ${{ github.event.inputs.openshift_version }}
     secrets:
