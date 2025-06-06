@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      openshift_version:
+        description: 'OpenShift Version'
+        required: true
+        default: '4.18.17'
+        type: string
 
 permissions:
   id-token: write   # Required for OIDC token generation
@@ -196,6 +201,7 @@ jobs:
       region: "us-east-1"
       environment: ${{ github.event.inputs.environment }}
       base_domain: "sandbox1936.opentlc.com"
+      openshift_version: ${{ github.event.inputs.openshift_version }}
     secrets:
       VAULT_URL: ${{ secrets.VAULT_URL }}
       VAULT_JWT_AUDIENCE: ${{ secrets.VAULT_JWT_AUDIENCE }}

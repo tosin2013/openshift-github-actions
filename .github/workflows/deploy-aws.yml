@@ -41,7 +41,7 @@ on:
       openshift_version:
         description: 'OpenShift Version'
         required: true
-        default: '4.18.0'
+        default: '4.18.17'
         type: string
       base_domain:
         description: 'Base Domain'
@@ -80,7 +80,7 @@ on:
       openshift_version:
         description: 'OpenShift Version'
         required: false
-        default: '4.18.0'
+        default: '4.18.17'
         type: string
       base_domain:
         description: 'Base Domain'
@@ -177,21 +177,19 @@ jobs:
         run: |
           mkdir -p ~/bin
 
-          # Use a stable version that we know exists
-          OPENSHIFT_VERSION="4.17.5"
-          echo "Using OpenShift version: $OPENSHIFT_VERSION"
+          echo "Using OpenShift version: ${{ env.OPENSHIFT_VERSION }}"
 
           # Download OpenShift client with error handling
           echo "Downloading OpenShift client..."
-          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_VERSION}/openshift-client-linux.tar.gz" | tar xz -C ~/bin; then
-            echo "Failed to download OpenShift client, trying latest stable..."
+          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-client-linux.tar.gz" | tar xz -C ~/bin; then
+            echo "Failed to download OpenShift client for version ${{ env.OPENSHIFT_VERSION }}, trying latest stable..."
             curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz" | tar xz -C ~/bin
           fi
 
           # Download OpenShift installer with error handling
           echo "Downloading OpenShift installer..."
-          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_VERSION}/openshift-install-linux.tar.gz" | tar xz -C ~/bin; then
-            echo "Failed to download OpenShift installer, trying latest stable..."
+          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-install-linux.tar.gz" | tar xz -C ~/bin; then
+            echo "Failed to download OpenShift installer for version ${{ env.OPENSHIFT_VERSION }}, trying latest stable..."
             curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-install-linux.tar.gz" | tar xz -C ~/bin
           fi
 
