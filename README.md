@@ -14,28 +14,46 @@ This repository contains GitHub Actions workflows for automating OpenShift 4.18 
 ## Prerequisites
 
 - GitHub account with Actions enabled
-- HashiCorp Vault instance or HCP Vault
+- OpenShift cluster with admin access (for Vault deployment)
+- HashiCorp Vault instance or HCP Vault (can be deployed using included scripts)
 - Cloud provider accounts (AWS, Azure, GCP) with appropriate permissions
-- OpenShift Pull Secret from Red Hat
+- OpenShift Pull Secret from Red Hat (saved as `~/pull-secret.json`)
 - Domain name with DNS management capabilities
+- cert-manager installed on OpenShift cluster
+- Helm 3.x installed locally
 
 ## Quick Start
 
 1. **Clone this repository**
    ```bash
-   git clone https://github.com/your-org/openshift-github-actions.git
+   git clone https://github.com/tosin2013/openshift-github-actions.git
    cd openshift-github-actions
    ```
 
-2. **Configure HashiCorp Vault**
-   - Follow the [Vault Setup Guide](docs/common/vault-setup.md)
-   - Store your cloud provider credentials and OpenShift secrets
+2. **Deploy HashiCorp Vault (if needed)**
+   ```bash
+   # Deploy Vault HA cluster with TLS
+   export VAULT_NAMESPACE="vault-test-pragmatic"
+   ./deploy_vault_ha_tls_complete.sh
+   ```
 
-3. **Configure GitHub repository secrets**
+3. **Prepare OpenShift Pull Secret**
+   ```bash
+   # Download from https://console.redhat.com/openshift/install/pull-secret
+   # Save as ~/pull-secret.json
+   ```
+
+4. **Add Required Secrets to Vault**
+   ```bash
+   # This script adds pull secret and SSH keys to Vault
+   ./scripts/vault/add-openshift-secrets.sh
+   ```
+
+5. **Configure GitHub repository secrets**
    - Add your Vault URL and authentication details
    - See [GitHub Actions Setup](docs/common/github-actions-setup.md)
 
-4. **Run a deployment workflow**
+6. **Run a deployment workflow**
    - Navigate to Actions tab in GitHub
    - Select your desired cloud provider workflow
    - Provide required parameters and deploy
@@ -50,6 +68,7 @@ openshift-github-actions/
 │   ├── aws/               # AWS-specific scripts
 │   ├── azure/             # Azure-specific scripts
 │   ├── gcp/               # GCP-specific scripts
+│   ├── vault/             # Vault setup and management scripts
 │   └── common/            # Common utilities and functions
 ├── config/
 │   ├── aws/               # AWS configuration templates
@@ -102,6 +121,43 @@ graph TD
 ```
 
 
+
+## 🔐 Vault Secrets Setup (Required)
+
+Before deploying OpenShift clusters, you must add the required secrets to Vault using the automated setup script.
+
+### Required Secrets
+
+The deployment workflows require these secrets in Vault:
+- **Pull Secret**: OpenShift pull secret from Red Hat (`secret/data/openshift/pull-secret`)
+- **SSH Keys**: SSH key pair for cluster access (`secret/data/openshift/ssh-keys/dev`)
+
+### Automated Setup
+
+```bash
+# 1. Download your pull secret from Red Hat
+# https://console.redhat.com/openshift/install/pull-secret
+# Save as ~/pull-secret.json
+
+# 2. Run the automated setup script
+./scripts/vault/add-openshift-secrets.sh
+```
+
+### What the Script Does
+
+1. ✅ **Validates Vault connectivity** - Ensures Vault is accessible
+2. ✅ **Enables KV secrets engine** - Sets up `secret/` path if needed
+3. ✅ **Adds pull secret** - Reads from `~/pull-secret.json` and stores in Vault
+4. ✅ **Generates SSH keys** - Creates RSA 4096-bit key pair for cluster access
+5. ✅ **Verifies setup** - Confirms all secrets are properly stored
+
+### Manual Verification
+
+```bash
+# Check if secrets exist in Vault
+oc exec vault-0 -n vault-test-pragmatic -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv get secret/openshift/pull-secret
+oc exec vault-0 -n vault-test-pragmatic -- env VAULT_TOKEN="$ROOT_TOKEN" vault kv get secret/openshift/ssh-keys/dev
+```
 
 ## Supported Cloud Providers
 
@@ -214,7 +270,8 @@ export VAULT_NAMESPACE="vault-production"
 
 ### 🎯 Key Scripts
 
-- **`deploy_vault_ha_tls_complete.sh`** - Main deployment automation
+- **`deploy_vault_ha_tls_complete.sh`** - Main Vault HA deployment automation
+- **`scripts/vault/add-openshift-secrets.sh`** - **REQUIRED**: Add OpenShift secrets to Vault
 - **`direct_vault_init.sh`** - Vault initialization and unsealing
 - **`verify_vault_deployment.sh`** - Deployment verification and scoring
 

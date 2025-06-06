@@ -248,6 +248,29 @@ vault write auth/jwt/role/github-actions-role \
     ttl=1h
 ```
 
+### OpenShift Secrets Setup (Required)
+
+**IMPORTANT**: Before deploying OpenShift clusters, you must add the required secrets to Vault using our automated setup script.
+
+#### Quick Setup
+
+```bash
+# 1. Download your OpenShift pull secret from Red Hat
+# https://console.redhat.com/openshift/install/pull-secret
+# Save as ~/pull-secret.json
+
+# 2. Run the automated setup script
+./scripts/vault/add-openshift-secrets.sh
+```
+
+#### What Gets Added
+
+The script automatically adds these required secrets to Vault:
+- **Pull Secret**: OpenShift pull secret from Red Hat (`secret/data/openshift/pull-secret`)
+- **SSH Keys**: RSA 4096-bit key pair for cluster access (`secret/data/openshift/ssh-keys/dev`)
+
+For detailed information, see [OpenShift Secrets Setup Guide](../vault/openshift-secrets-setup.md).
+
 ### Integrating with GitHub Actions
 
 To use your self-hosted Vault with GitHub Actions, add the following secrets to your GitHub repository:
@@ -265,9 +288,13 @@ Then update your workflow files to authenticate with Vault:
     role: ${{ secrets.VAULT_ROLE }}
     method: jwt
     jwtGithubAudience: https://github.com/your-github-org
+    tlsSkipVerify: true
     secrets: |
       aws/creds/openshift-installer access_key | AWS_ACCESS_KEY_ID ;
-      aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY
+      aws/creds/openshift-installer secret_key | AWS_SECRET_ACCESS_KEY ;
+      secret/data/openshift/pull-secret pullSecret | PULL_SECRET ;
+      secret/data/openshift/ssh-keys/dev private_key | SSH_PRIVATE_KEY ;
+      secret/data/openshift/ssh-keys/dev public_key | SSH_PUBLIC_KEY
 ```
 
 ### Backup and Recovery

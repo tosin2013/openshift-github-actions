@@ -11,6 +11,11 @@ This directory contains Architecture Decision Records for the Vault HA deploymen
 | [003](003-multi-cloud-vault-integration.md) | Multi-Cloud Vault Integration Strategy | Proposed | 2025-06-04 |
 | [004](004-github-actions-workflow-orchestration.md) | GitHub Actions Workflow Orchestration Strategy | Proposed | 2025-06-04 |
 | [005](005-dynamic-secrets-credential-management.md) | Dynamic Secrets and Credential Management Strategy | Proposed | 2025-06-04 |
+| [006](006-aws-openshift-integration-strategy.md) | AWS OpenShift Integration Strategy | Proposed | 2025-06-04 |
+| [007](007-azure-openshift-integration-strategy.md) | Azure OpenShift Integration Strategy | Proposed | 2025-06-04 |
+| [008](008-gcp-openshift-integration-strategy.md) | GCP OpenShift Integration Strategy | Proposed | 2025-06-04 |
+| [009](009-github-actions-jwt-authentication-strategy.md) | GitHub Actions JWT Authentication Strategy | Proposed | 2025-06-04 |
+| [010](010-openshift-secrets-vault-integration.md) | OpenShift Secrets Vault Integration Strategy | Accepted | 2025-06-06 |
 
 ## ADR Process
 
@@ -43,6 +48,12 @@ This directory contains Architecture Decision Records for the Vault HA deploymen
 - **Dynamic Credentials**: Just-in-time credential provisioning for security
 - **GitHub Actions**: Hierarchical workflow orchestration with Vault-first dependency
 - **Zero Trust**: No long-lived credentials, time-bound access only
+
+### OpenShift Secrets Management
+- **Automated Setup**: Single script for all required OpenShift secrets
+- **Vault KV Integration**: Structured secret storage with versioning
+- **Security First**: No secrets in logs, encrypted storage, access control
+- **Environment Isolation**: Separate SSH keys per deployment environment
 
 ## Related Documentation
 
