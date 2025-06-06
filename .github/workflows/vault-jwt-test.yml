@@ -66,13 +66,17 @@ jobs:
             if [[ -n "$AWS_ACCESS_KEY_ID" ]]; then
               echo "✅ AWS credentials retrieved"
               score=$((score + 30))
-              
-              # Test AWS credentials
+
+              # Wait for AWS propagation (new IAM users need time to become active)
+              echo "⏳ Waiting 60 seconds for AWS IAM user propagation..."
+              sleep 60
+
+              # Test AWS credentials after propagation delay
               if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
-                echo "✅ AWS credentials validated"
+                echo "✅ AWS credentials validated after propagation delay"
                 score=$((score + 20))
               else
-                echo "❌ AWS credentials validation failed"
+                echo "❌ AWS credentials validation failed even after propagation delay"
               fi
             else
               echo "❌ AWS credentials not retrieved"
