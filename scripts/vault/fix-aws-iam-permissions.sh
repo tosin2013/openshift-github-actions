@@ -119,7 +119,7 @@ attach_policy_to_user() {
   log "INFO" "Attaching policy to user: $user_name"
   
   # Check if policy is already attached
-  if aws iam list-attached-user-policies --user-name "$user_name" --query "AttachedPolicies[?PolicyArn=='$policy_arn']" --output text | grep -q "$policy_arn"; then
+  if aws iam list-attached-user-policies --user-name "$user_name" --query "AttachedPolicies[?PolicyArn=='$policy_arn']" --output text | grep -q "VaultDynamicUserCreation"; then
     log "INFO" "Policy already attached to user: $user_name"
   else
     aws iam attach-user-policy --user-name "$user_name" --policy-arn "$policy_arn"
