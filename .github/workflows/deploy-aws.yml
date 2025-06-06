@@ -124,7 +124,7 @@ jobs:
             --region "$REGION" \
             --node-count "$NODE_COUNT" \
             --instance-type "$INSTANCE_TYPE" \
-            --base-domain "$BASE_DOMAIN"
+            --base-domain "vault-managed"
           echo "status=success" >> $GITHUB_OUTPUT
 
   deploy:
