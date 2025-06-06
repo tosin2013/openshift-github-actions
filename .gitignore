@@ -6,6 +6,7 @@ vault-tls-config.hcl
 /tmp/root-token.txt
 /tmp/unseal-keys.txt
 /tmp/raft-peers.txt
+node_modules
 
 # OpenShift sensitive files
 *.token
