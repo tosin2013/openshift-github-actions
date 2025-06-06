@@ -128,7 +128,10 @@ jobs:
 
       - name: Validate AWS credentials
         run: |
-          aws sts get-caller-identity
+          echo "⏳ Waiting 30 seconds for AWS IAM user propagation..."
+          sleep 30
+          echo "Testing AWS credentials from Vault..."
+          aws sts get-caller-identity --region ${{ env.REGION }}
           aws ec2 describe-regions --region ${{ env.REGION }}
 
       - name: Prepare SSH key

@@ -158,7 +158,7 @@ jobs:
               sleep 30
               
               # Validate credentials
-              if aws sts get-caller-identity --region us-east-2 >/dev/null 2>&1; then
+              if aws sts get-caller-identity --region us-east-1 >/dev/null 2>&1; then
                 echo "✅ AWS credentials validated"
                 echo "status=success" >> $GITHUB_OUTPUT
               else
