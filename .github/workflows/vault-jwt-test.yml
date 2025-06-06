@@ -60,6 +60,8 @@ jobs:
         if: steps.test.outcome == 'success'
         run: |
           echo "Testing AWS credentials from vault-action..."
+          echo "⏳ Waiting 30 seconds for AWS IAM user propagation before initial validation..."
+          sleep 30
           aws sts get-caller-identity --region ${{ github.event.inputs.aws_region }} || echo "AWS validation failed"
 
       - name: Calculate Vault Action Score
