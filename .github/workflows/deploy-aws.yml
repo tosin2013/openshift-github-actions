@@ -278,7 +278,8 @@ jobs:
         run: |
           ./scripts/aws/cleanup-failed-deployment.sh \
             --cluster-name "$CLUSTER_NAME" \
-            --region "$REGION"
+            --region "$REGION" \
+            --force
 
       - name: Set deployment result
         id: deployment_result
