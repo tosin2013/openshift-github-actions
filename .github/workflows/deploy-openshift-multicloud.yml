@@ -193,9 +193,9 @@ jobs:
     uses: ./.github/workflows/deploy-aws.yml
     with:
       cluster_name: ${{ github.event.inputs.cluster_name }}
-      region: ${{ secrets.AWS_REGION }}
+      region: "us-east-1"
       environment: ${{ github.event.inputs.environment }}
-      base_domain: ${{ secrets.CLUSTER_BASE_DOMAIN }}
+      base_domain: "sandbox1936.opentlc.com"
     secrets:
       VAULT_URL: ${{ secrets.VAULT_URL }}
       VAULT_JWT_AUDIENCE: ${{ secrets.VAULT_JWT_AUDIENCE }}
