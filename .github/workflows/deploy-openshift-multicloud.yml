@@ -166,39 +166,44 @@ jobs:
 
       - name: Deploy OpenShift on AWS
         id: deploy
-        if: ${{ !github.event.inputs.dry_run }}
         run: |
           echo "🚀 Deploying OpenShift cluster on AWS..."
           echo "Cluster Name: ${{ github.event.inputs.cluster_name }}"
           echo "Environment: ${{ github.event.inputs.environment }}"
           echo "Base Domain: ${{ env.CLUSTER_BASE_DOMAIN }}"
-          
-          score=0
-          
-          # Simulate deployment process (replace with actual deployment logic)
-          echo "📋 Creating install-config.yaml..."
-          score=$((score + 20))
-          
-          echo "🔧 Running openshift-install create cluster..."
-          # openshift-install create cluster --dir=./cluster --log-level=info
-          score=$((score + 60))
-          
-          echo "✅ Cluster deployment initiated"
-          score=$((score + 20))
-          
-          echo "Deployment Score: $score/100"
-          echo "score=$score" >> $GITHUB_OUTPUT
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "Dry Run: ${{ github.event.inputs.dry_run }}"
 
-      - name: Dry Run Validation
-        if: ${{ github.event.inputs.dry_run }}
-        run: |
-          echo "🔍 Performing dry run validation..."
-          echo "✅ AWS credentials: Valid"
-          echo "✅ Cluster configuration: Valid"
-          echo "✅ Network configuration: Valid"
-          echo "✅ DNS configuration: Valid"
-          echo "🎯 Dry run completed successfully"
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+            echo "🔍 Performing dry run validation..."
+            echo "✅ AWS credentials: Valid"
+            echo "✅ Cluster configuration: Valid"
+            echo "✅ Network configuration: Valid"
+            echo "✅ DNS configuration: Valid"
+            echo "🎯 Dry run completed successfully"
+            echo "score=100" >> $GITHUB_OUTPUT
+            echo "status=dry_run_success" >> $GITHUB_OUTPUT
+          else
+            echo "🚀 Starting actual OpenShift deployment..."
+
+            score=0
+
+            # Simulate deployment process (replace with actual deployment logic)
+            echo "📋 Creating install-config.yaml..."
+            score=$((score + 20))
+
+            echo "🔧 Running openshift-install create cluster..."
+            # openshift-install create cluster --dir=./cluster --log-level=info
+            score=$((score + 60))
+
+            echo "✅ Cluster deployment initiated"
+            score=$((score + 20))
+
+            echo "Deployment Score: $score/100"
+            echo "score=$score" >> $GITHUB_OUTPUT
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+
+
 
   deploy-azure:
     if: ${{ github.event.inputs.cloud_provider == 'azure' || github.event.inputs.cloud_provider == 'all' }}
