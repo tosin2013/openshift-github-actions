@@ -108,13 +108,13 @@ on:
         value: ${{ jobs.deploy.outputs.score }}
 
 env:
-  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
-  REGION: ${{ github.event.inputs.region }}
-  NODE_COUNT: ${{ github.event.inputs.node_count }}
-  INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
-  OPENSHIFT_VERSION: ${{ github.event.inputs.openshift_version }}
-  BASE_DOMAIN: ${{ github.event.inputs.base_domain }}
-  ENVIRONMENT: ${{ github.event.inputs.environment }}
+  CLUSTER_NAME: ${{ inputs.cluster_name || github.event.inputs.cluster_name }}
+  REGION: ${{ inputs.region || github.event.inputs.region }}
+  NODE_COUNT: ${{ inputs.node_count || github.event.inputs.node_count }}
+  INSTANCE_TYPE: ${{ inputs.instance_type || github.event.inputs.instance_type }}
+  OPENSHIFT_VERSION: ${{ inputs.openshift_version || github.event.inputs.openshift_version }}
+  BASE_DOMAIN: ${{ inputs.base_domain || github.event.inputs.base_domain }}
+  ENVIRONMENT: ${{ inputs.environment || github.event.inputs.environment }}
 
 jobs:
   validate:
