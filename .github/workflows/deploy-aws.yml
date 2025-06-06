@@ -176,9 +176,30 @@ jobs:
       - name: Install OpenShift CLI
         run: |
           mkdir -p ~/bin
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-client-linux.tar.gz | tar xz -C ~/bin
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-install-linux.tar.gz | tar xz -C ~/bin
+
+          # Use a stable version that we know exists
+          OPENSHIFT_VERSION="4.17.5"
+          echo "Using OpenShift version: $OPENSHIFT_VERSION"
+
+          # Download OpenShift client with error handling
+          echo "Downloading OpenShift client..."
+          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_VERSION}/openshift-client-linux.tar.gz" | tar xz -C ~/bin; then
+            echo "Failed to download OpenShift client, trying latest stable..."
+            curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz" | tar xz -C ~/bin
+          fi
+
+          # Download OpenShift installer with error handling
+          echo "Downloading OpenShift installer..."
+          if ! curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_VERSION}/openshift-install-linux.tar.gz" | tar xz -C ~/bin; then
+            echo "Failed to download OpenShift installer, trying latest stable..."
+            curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-install-linux.tar.gz" | tar xz -C ~/bin
+          fi
+
           echo "$HOME/bin" >> $GITHUB_PATH
+
+          # Verify installation
+          ~/bin/oc version --client
+          ~/bin/openshift-install version
 
       - name: Validate AWS credentials
         run: |
