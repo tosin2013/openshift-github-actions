@@ -46,7 +46,7 @@ on:
       base_domain:
         description: 'Base Domain'
         required: true
-        default: 'sandbox1936.opentlc.com'
+        default: 'sandbox3223.opentlc.com'
         type: string
       environment:
         description: 'Environment'
@@ -86,7 +86,7 @@ on:
       base_domain:
         description: 'Base Domain'
         required: false
-        default: 'sandbox1936.opentlc.com'
+        default: 'sandbox3223.opentlc.com'
         type: string
       environment:
         description: 'Environment'
@@ -203,14 +203,21 @@ jobs:
 
       - name: Set base domain from Vault
         run: |
+          echo "🔍 Base domain configuration:"
+          echo "  VAULT_BASE_DOMAIN: '$VAULT_BASE_DOMAIN'"
+          echo "  Input BASE_DOMAIN: '${{ env.BASE_DOMAIN }}'"
+
           # Use Vault base domain if available, otherwise use input parameter
           if [[ -n "$VAULT_BASE_DOMAIN" ]]; then
-            echo "Using base domain from Vault: $VAULT_BASE_DOMAIN"
+            echo "✅ Using base domain from Vault: $VAULT_BASE_DOMAIN"
             echo "BASE_DOMAIN=$VAULT_BASE_DOMAIN" >> $GITHUB_ENV
+            FINAL_DOMAIN="$VAULT_BASE_DOMAIN"
           else
-            echo "Using base domain from input: ${{ env.BASE_DOMAIN }}"
+            echo "⚠️  No Vault base domain found, using input: ${{ env.BASE_DOMAIN }}"
+            echo "BASE_DOMAIN=${{ env.BASE_DOMAIN }}" >> $GITHUB_ENV
+            FINAL_DOMAIN="${{ env.BASE_DOMAIN }}"
           fi
-          echo "Final base domain: $BASE_DOMAIN"
+          echo "🎯 Final base domain: $FINAL_DOMAIN"
 
       - name: Validate AWS credentials
         run: |
