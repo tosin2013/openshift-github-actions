@@ -43,11 +43,6 @@ on:
         required: true
         default: '4.18.17'
         type: string
-      base_domain:
-        description: 'Base Domain'
-        required: true
-        default: 'sandbox3223.opentlc.com'
-        type: string
       environment:
         description: 'Environment'
         required: true
@@ -83,11 +78,6 @@ on:
         required: false
         default: '4.18.17'
         type: string
-      base_domain:
-        description: 'Base Domain'
-        required: false
-        default: 'sandbox3223.opentlc.com'
-        type: string
       environment:
         description: 'Environment'
         required: false
@@ -114,7 +104,6 @@ env:
   NODE_COUNT: ${{ inputs.node_count || github.event.inputs.node_count }}
   INSTANCE_TYPE: ${{ inputs.instance_type || github.event.inputs.instance_type }}
   OPENSHIFT_VERSION: ${{ inputs.openshift_version || github.event.inputs.openshift_version }}
-  BASE_DOMAIN: ${{ inputs.base_domain || github.event.inputs.base_domain }}
   ENVIRONMENT: ${{ inputs.environment || github.event.inputs.environment }}
 
 jobs:
@@ -205,19 +194,18 @@ jobs:
         run: |
           echo "🔍 Base domain configuration:"
           echo "  VAULT_BASE_DOMAIN: '$VAULT_BASE_DOMAIN'"
-          echo "  Input BASE_DOMAIN: '${{ env.BASE_DOMAIN }}'"
 
-          # Use Vault base domain if available, otherwise use input parameter
+          # Use Vault base domain (required)
           if [[ -n "$VAULT_BASE_DOMAIN" ]]; then
             echo "✅ Using base domain from Vault: $VAULT_BASE_DOMAIN"
             echo "BASE_DOMAIN=$VAULT_BASE_DOMAIN" >> $GITHUB_ENV
-            FINAL_DOMAIN="$VAULT_BASE_DOMAIN"
+            echo "🎯 Final base domain: $VAULT_BASE_DOMAIN"
           else
-            echo "⚠️  No Vault base domain found, using input: ${{ env.BASE_DOMAIN }}"
-            echo "BASE_DOMAIN=${{ env.BASE_DOMAIN }}" >> $GITHUB_ENV
-            FINAL_DOMAIN="${{ env.BASE_DOMAIN }}"
+            echo "❌ ERROR: No base domain found in Vault!"
+            echo "Please run: ./scripts/vault/add-openshift-secrets.sh"
+            echo "This will configure the base domain in Vault for your environment."
+            exit 1
           fi
-          echo "🎯 Final base domain: $FINAL_DOMAIN"
 
       - name: Validate AWS credentials
         run: |
