@@ -33,7 +33,6 @@ jobs:
 
       - name: Test Vault Action Authentication
         id: test
-        continue-on-error: true
         uses: hashicorp/vault-action@v2
         with:
           url: ${{ secrets.VAULT_URL }}
@@ -77,6 +76,8 @@ jobs:
                 score=$((score + 20))
               else
                 echo "❌ AWS credentials validation failed even after propagation delay"
+                echo "🚨 CRITICAL: AWS credentials are not working - failing pipeline"
+                exit 1
               fi
             else
               echo "❌ AWS credentials not retrieved"
@@ -113,7 +114,6 @@ jobs:
 
       - name: Test OC Exec Vault Access
         id: test
-        continue-on-error: true
         run: |
           echo "Testing oc exec approach..."
           
@@ -158,7 +158,9 @@ jobs:
                 echo "status=CREDENTIALS_SUCCESS" >> $GITHUB_OUTPUT
               else
                 echo "❌ AWS credentials validation failed even after propagation delay"
+                echo "🚨 CRITICAL: AWS credentials are not working - failing pipeline"
                 echo "status=VALIDATION_FAILED" >> $GITHUB_OUTPUT
+                exit 1
               fi
             else
               echo "❌ Credential extraction failed"
@@ -216,7 +218,7 @@ jobs:
           echo "score=$score" >> $GITHUB_OUTPUT
 
   compare-results:
-    if: ${{ github.event.inputs.test_method == 'both' }}
+    if: ${{ github.event.inputs.test_method == 'both' && always() }}
     needs: [test-vault-action, test-oc-exec]
     runs-on: ubuntu-latest
     steps:
@@ -224,25 +226,57 @@ jobs:
         run: |
           echo "=== VAULT INTEGRATION COMPARISON ==="
           echo ""
+
+          # Check job results
+          vault_result="${{ needs.test-vault-action.result }}"
+          oc_result="${{ needs.test-oc-exec.result }}"
+
           echo "Vault Action Approach:"
-          echo "  Status: ${{ needs.test-vault-action.outputs.vault_action_status }}"
-          echo "  Score:  ${{ needs.test-vault-action.outputs.vault_action_score }}/100"
-          echo ""
-          echo "OC Exec Approach:"
-          echo "  Status: ${{ needs.test-oc-exec.outputs.oc_exec_status }}"
-          echo "  Score:  ${{ needs.test-oc-exec.outputs.oc_exec_score }}/100"
-          echo ""
-          
-          vault_score=${{ needs.test-vault-action.outputs.vault_action_score }}
-          oc_score=${{ needs.test-oc-exec.outputs.oc_exec_score }}
-          
-          if [[ $oc_score -gt $vault_score ]]; then
-            echo "🏆 WINNER: OC Exec approach (Score: $oc_score vs $vault_score)"
-            echo "RECOMMENDATION: Use proven oc exec pattern for production"
-          elif [[ $vault_score -gt $oc_score ]]; then
-            echo "🏆 WINNER: Vault Action approach (Score: $vault_score vs $oc_score)"
-            echo "RECOMMENDATION: Use vault-action@v2 for production"
+          echo "  Result: $vault_result"
+          if [[ "$vault_result" == "success" ]]; then
+            echo "  Status: ${{ needs.test-vault-action.outputs.vault_action_status }}"
+            echo "  Score:  ${{ needs.test-vault-action.outputs.vault_action_score }}/100"
           else
-            echo "🤝 TIE: Both approaches scored equally ($vault_score/100)"
-            echo "RECOMMENDATION: Choose based on operational preferences"
+            echo "  Status: FAILED"
+            echo "  Score:  0/100 (Pipeline failed due to AWS validation failure)"
+          fi
+          echo ""
+
+          echo "OC Exec Approach:"
+          echo "  Result: $oc_result"
+          if [[ "$oc_result" == "success" ]]; then
+            echo "  Status: ${{ needs.test-oc-exec.outputs.oc_exec_status }}"
+            echo "  Score:  ${{ needs.test-oc-exec.outputs.oc_exec_score }}/100"
+          else
+            echo "  Status: FAILED"
+            echo "  Score:  0/100 (Pipeline failed due to AWS validation failure)"
+          fi
+          echo ""
+          
+          # Determine winner based on job success
+          if [[ "$vault_result" == "success" && "$oc_result" == "success" ]]; then
+            vault_score=${{ needs.test-vault-action.outputs.vault_action_score }}
+            oc_score=${{ needs.test-oc-exec.outputs.oc_exec_score }}
+
+            if [[ $oc_score -gt $vault_score ]]; then
+              echo "🏆 WINNER: OC Exec approach (Score: $oc_score vs $vault_score)"
+              echo "RECOMMENDATION: Use proven oc exec pattern for production"
+            elif [[ $vault_score -gt $oc_score ]]; then
+              echo "🏆 WINNER: Vault Action approach (Score: $vault_score vs $oc_score)"
+              echo "RECOMMENDATION: Use vault-action@v2 for production"
+            else
+              echo "🤝 TIE: Both approaches scored equally ($vault_score/100)"
+              echo "RECOMMENDATION: Choose based on operational preferences"
+            fi
+          elif [[ "$vault_result" == "success" && "$oc_result" != "success" ]]; then
+            echo "🏆 WINNER: Vault Action approach (Only successful approach)"
+            echo "RECOMMENDATION: Use vault-action@v2 for production"
+          elif [[ "$vault_result" != "success" && "$oc_result" == "success" ]]; then
+            echo "🏆 WINNER: OC Exec approach (Only successful approach)"
+            echo "RECOMMENDATION: Use proven oc exec pattern for production"
+          else
+            echo "❌ BOTH APPROACHES FAILED"
+            echo "🚨 CRITICAL: Neither approach can validate AWS credentials"
+            echo "RECOMMENDATION: Fix AWS IAM permissions before proceeding"
+            exit 1
           fi
