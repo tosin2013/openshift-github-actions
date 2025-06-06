@@ -56,6 +56,56 @@ on:
           - dev
           - staging
           - production
+  workflow_call:
+    inputs:
+      cluster_name:
+        description: 'Cluster Name'
+        required: true
+        type: string
+      region:
+        description: 'AWS Region'
+        required: false
+        default: 'us-east-1'
+        type: string
+      node_count:
+        description: 'Worker Node Count'
+        required: false
+        default: '3'
+        type: string
+      instance_type:
+        description: 'Worker Instance Type'
+        required: false
+        default: 'm5.xlarge'
+        type: string
+      openshift_version:
+        description: 'OpenShift Version'
+        required: false
+        default: '4.18.0'
+        type: string
+      base_domain:
+        description: 'Base Domain'
+        required: false
+        default: 'sandbox1936.opentlc.com'
+        type: string
+      environment:
+        description: 'Environment'
+        required: false
+        default: 'dev'
+        type: string
+    secrets:
+      VAULT_URL:
+        required: true
+      VAULT_JWT_AUDIENCE:
+        required: true
+      VAULT_ROLE:
+        required: true
+    outputs:
+      deployment_status:
+        description: 'Deployment status'
+        value: ${{ jobs.deploy.outputs.status }}
+      deployment_score:
+        description: 'Deployment score'
+        value: ${{ jobs.deploy.outputs.score }}
 
 env:
   CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
@@ -91,6 +141,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     if: needs.validate.outputs.validation_status == 'success'
+    outputs:
+      status: ${{ steps.deployment_result.outputs.status }}
+      score: ${{ steps.deployment_result.outputs.score }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -206,3 +259,15 @@ jobs:
           ./scripts/aws/cleanup-failed-deployment.sh \
             --cluster-name "$CLUSTER_NAME" \
             --region "$REGION"
+
+      - name: Set deployment result
+        id: deployment_result
+        if: always()
+        run: |
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "score=100" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "score=0" >> $GITHUB_OUTPUT
+          fi

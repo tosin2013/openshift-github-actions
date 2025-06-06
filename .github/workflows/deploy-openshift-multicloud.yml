@@ -41,6 +41,7 @@ env:
   VAULT_NAMESPACE: vault-test-pragmatic
   CLUSTER_BASE_DOMAIN: sandbox1936.opentlc.com
   OPENSHIFT_VERSION: "4.18"
+  AWS_REGION: "us-east-1"
 
 jobs:
   validate-prerequisites:
@@ -155,7 +156,7 @@ jobs:
           echo "⏳ Waiting 30 seconds for AWS IAM user propagation before initial validation..."
           sleep 30
 
-          if aws sts get-caller-identity --region us-east-1; then
+          if aws sts get-caller-identity --region ${{ env.AWS_REGION }}; then
             echo "✅ AWS credentials validated successfully"
             echo "status=success" >> $GITHUB_OUTPUT
           else
@@ -164,7 +165,7 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy OpenShift on AWS
+      - name: Deploy OpenShift on AWS (Dry Run Check)
         id: deploy
         run: |
           echo "🚀 Deploying OpenShift cluster on AWS..."
@@ -183,25 +184,24 @@ jobs:
             echo "score=100" >> $GITHUB_OUTPUT
             echo "status=dry_run_success" >> $GITHUB_OUTPUT
           else
-            echo "🚀 Starting actual OpenShift deployment..."
-
-            score=0
-
-            # Simulate deployment process (replace with actual deployment logic)
-            echo "📋 Creating install-config.yaml..."
-            score=$((score + 20))
-
-            echo "🔧 Running openshift-install create cluster..."
-            # openshift-install create cluster --dir=./cluster --log-level=info
-            score=$((score + 60))
-
-            echo "✅ Cluster deployment initiated"
-            score=$((score + 20))
-
-            echo "Deployment Score: $score/100"
-            echo "score=$score" >> $GITHUB_OUTPUT
-            echo "status=success" >> $GITHUB_OUTPUT
+            echo "🚀 Proceeding to actual OpenShift deployment..."
+            echo "score=0" >> $GITHUB_OUTPUT
+            echo "status=proceeding_to_deployment" >> $GITHUB_OUTPUT
           fi
+
+  deploy-aws-real:
+    if: ${{ (github.event.inputs.cloud_provider == 'aws' || github.event.inputs.cloud_provider == 'all') && github.event.inputs.dry_run != 'true' }}
+    needs: [validate-prerequisites, deploy-aws]
+    uses: ./.github/workflows/deploy-aws.yml
+    with:
+      cluster_name: ${{ github.event.inputs.cluster_name }}
+      region: ${{ env.AWS_REGION }}
+      environment: ${{ github.event.inputs.environment }}
+      base_domain: ${{ env.CLUSTER_BASE_DOMAIN }}
+    secrets:
+      VAULT_URL: ${{ secrets.VAULT_URL }}
+      VAULT_JWT_AUDIENCE: ${{ secrets.VAULT_JWT_AUDIENCE }}
+      VAULT_ROLE: ${{ secrets.VAULT_ROLE }}
 
 
 
@@ -232,7 +232,7 @@ jobs:
           echo "Using similar pattern as AWS with GCP credentials from Vault"
 
   deployment-summary:
-    needs: [validate-prerequisites, deploy-aws]
+    needs: [validate-prerequisites, deploy-aws, deploy-aws-real]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -243,12 +243,19 @@ jobs:
           echo "Prerequisites Validation: ${{ needs.validate-prerequisites.outputs.validation_score }}/100"
           echo "Vault Status: ${{ needs.validate-prerequisites.outputs.vault_status }}"
           echo ""
-          
+
           if [[ "${{ github.event.inputs.cloud_provider }}" == "aws" || "${{ github.event.inputs.cloud_provider }}" == "all" ]]; then
             echo "AWS Deployment:"
-            echo "  Status: ${{ needs.deploy-aws.outputs.deployment_status }}"
-            echo "  Score: ${{ needs.deploy-aws.outputs.deployment_score }}/100"
+            if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+              echo "  Status: ${{ needs.deploy-aws.outputs.deployment_status }}"
+              echo "  Score: ${{ needs.deploy-aws.outputs.deployment_score }}/100"
+              echo "  Mode: Dry Run"
+            else
+              echo "  Status: ${{ needs.deploy-aws-real.outputs.deployment_status }}"
+              echo "  Score: ${{ needs.deploy-aws-real.outputs.deployment_score }}/100"
+              echo "  Mode: Real Deployment"
+            fi
           fi
-          
+
           echo ""
-          echo "🎯 Deployment completed using proven OC Exec approach with Vault integration"
+          echo "🎯 Deployment completed using proven JWT approach with Vault integration"
