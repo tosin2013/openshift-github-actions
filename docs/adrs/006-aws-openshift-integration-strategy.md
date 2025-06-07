@@ -84,6 +84,9 @@ vault write aws/roles/openshift-installer \
 ```
 
 #### 2. **AWS IAM Policy for OpenShift IPI**
+
+> **Critical**: The OpenShift installer requires `iam:SimulatePrincipalPolicy` permission to validate installation permissions before proceeding. Without this permission, the installer will fail with `AccessDenied` error during the platform permissions check phase.
+
 ```json
 {
   "Version": "2012-10-17",
@@ -110,6 +113,15 @@ vault write aws/roles/openshift-installer \
         "iam:TagRole",
         "iam:TagUser",
         "iam:TagInstanceProfile",
+        "iam:SimulatePrincipalPolicy",
+        "iam:GetAccountSummary",
+        "iam:ListUsers",
+        "iam:ListRoles",
+        "iam:ListPolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListRolePolicies",
+        "iam:ListUserPolicies",
         "route53:*",
         "s3:*",
         "sts:AssumeRole",
@@ -120,6 +132,23 @@ vault write aws/roles/openshift-installer \
   ]
 }
 ```
+
+**Key Permissions for OpenShift Installer Validation:**
+- `iam:SimulatePrincipalPolicy`: **Required** for installer permission validation
+- `iam:GetAccountSummary`: Account limits and usage validation
+- `iam:List*` permissions: Resource discovery and validation
+- All permissions must be granted on `"Resource": "*"` for installer validation to work
+
+> **⚠️ Critical Reference**: This policy is based on the official Red Hat documentation:
+> [Installing on AWS - Account Setup](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/installing_on_aws/installing-aws-account)
+>
+> **Validation Process**: The OpenShift installer performs a comprehensive permissions check using `iam:SimulatePrincipalPolicy` before proceeding with installation. Without this permission, the installer will fail with:
+> ```
+> failed to generate asset "Platform Permissions Check": validate AWS credentials:
+> checking install permissions: error simulating policy: AccessDenied:
+> User: arn:aws:iam::ACCOUNT:user/USER is not authorized to perform:
+> iam:SimulatePrincipalPolicy
+> ```
 
 #### 3. **GitHub Actions Workflow Integration**
 ```yaml
@@ -275,8 +304,20 @@ jobs:
 
 ## References
 
+### Official Red Hat Documentation
+- **[Installing on AWS - Account Setup](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/installing_on_aws/installing-aws-account)** - **Primary Reference for AWS Permissions**
 - [OpenShift IPI on AWS Documentation](https://docs.openshift.com/container-platform/4.18/installing/installing_aws/installing-aws-default.html)
+
+### HashiCorp Vault Integration
 - [Vault AWS Secrets Engine](https://developer.hashicorp.com/vault/docs/secrets/aws)
-- [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
 - [GitHub Actions with Vault](https://github.com/hashicorp/vault-action)
-- **Related ADRs**: ADR-003 (Multi-Cloud Integration), ADR-005 (Dynamic Secrets), ADR-004 (GitHub Actions)
+
+### AWS Best Practices
+- [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
+
+### Related ADRs
+- **ADR-003**: Multi-Cloud Integration Strategy
+- **ADR-004**: GitHub Actions Workflow Orchestration
+- **ADR-005**: Dynamic Secrets Credential Management
+
+> **Note**: All IAM permissions in this ADR are based on the official Red Hat OpenShift 4.18 documentation for AWS account setup. Any deviations from the official requirements should be documented and justified.
