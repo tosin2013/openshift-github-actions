@@ -246,7 +246,7 @@ jobs:
 
       - name: Save cluster credentials
         run: |
-          ./scripts/common/save-cluster-credentials.sh \
+          ./scripts/common/save-cluster-credentials-k8s.sh \
             --provider aws \
             --cluster-name "$CLUSTER_NAME" \
             --region "$REGION" \
