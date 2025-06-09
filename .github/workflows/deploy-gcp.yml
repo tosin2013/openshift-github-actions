@@ -199,14 +199,14 @@ jobs:
 
       - name: Upload installation logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gcp-installation-logs-${{ env.CLUSTER_NAME }}
           path: installation-dir/.openshift_install.log
 
       - name: Upload kubeconfig
         if: success()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gcp-kubeconfig-${{ env.CLUSTER_NAME }}
           path: installation-dir/auth/kubeconfig
