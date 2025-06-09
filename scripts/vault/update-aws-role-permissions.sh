@@ -71,6 +71,9 @@ get_vault_token() {
     if [[ -n "${VAULT_ROOT_TOKEN:-}" ]]; then
       echo "$VAULT_ROOT_TOKEN"
       return 0
+    elif [[ -n "${ROOT_TOKEN:-}" ]]; then
+      echo "$ROOT_TOKEN"
+      return 0
     fi
   fi
   
