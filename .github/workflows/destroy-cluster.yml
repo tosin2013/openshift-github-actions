@@ -160,12 +160,22 @@ jobs:
             --region "$REGION" \
             --environment "$ENVIRONMENT"
 
+      - name: Restore installation metadata from Vault
+        run: |
+          ./scripts/common/restore-installation-metadata.sh \
+            --provider "$PROVIDER" \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT" \
+            --installation-dir installation-dir
+
       - name: Destroy OpenShift Cluster
         run: |
-          if [ -d "installation-dir" ]; then
+          if [ -d "installation-dir" ] && [ -f "installation-dir/terraform.tfstate" ]; then
+            echo "Using restored installation directory for cluster destruction"
             openshift-install destroy cluster --dir=installation-dir --log-level=info
           else
-            echo "WARNING: Installation directory not found. Attempting manual cleanup."
+            echo "WARNING: Installation directory or terraform state not available. Attempting manual cleanup."
             ./scripts/$PROVIDER/manual-cleanup.sh \
               --cluster-name "$CLUSTER_NAME" \
               --region "$REGION" \
