@@ -252,6 +252,15 @@ jobs:
             --region "$REGION" \
             --environment "$ENVIRONMENT"
 
+      - name: Backup installation metadata to Vault
+        run: |
+          ./scripts/common/save-installation-metadata.sh \
+            --provider aws \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --environment "$ENVIRONMENT" \
+            --installation-dir installation-dir
+
       - name: Configure cluster
         run: |
           export KUBECONFIG=installation-dir/auth/kubeconfig
