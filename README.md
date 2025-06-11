@@ -51,17 +51,23 @@ This repository contains GitHub Actions workflows for automating OpenShift 4.18 
    # Save as ~/pull-secret.json
    ```
 
-4. **Add Required Secrets to Vault**
+4. **Configure AWS Integration in Vault**
+   ```bash
+   # Configure AWS credentials and secrets engine in Vault
+   ./scripts/vault/setup-aws-integration.sh
+   ```
+
+5. **Add Required Secrets to Vault**
    ```bash
    # This script adds pull secret and SSH keys to Vault
    ./scripts/vault/add-openshift-secrets.sh
    ```
 
-5. **Configure GitHub repository secrets**
+6. **Configure GitHub repository secrets**
    - Add your Vault URL and authentication details
    - See [GitHub Actions Setup](docs/common/github-actions-setup.md)
 
-6. **Run a deployment workflow**
+7. **Run a deployment workflow**
    - Navigate to Actions tab in GitHub
    - Select your desired cloud provider workflow
    - Provide required parameters and deploy
@@ -147,12 +153,23 @@ The deployment workflows require these secrets in Vault:
 # https://console.redhat.com/openshift/install/pull-secret
 # Save as ~/pull-secret.json
 
-# 2. Run the automated setup script
+# 2. Configure AWS integration in Vault (REQUIRED FIRST)
+./scripts/vault/setup-aws-integration.sh
+
+# 3. Run the automated OpenShift secrets setup script
 ./scripts/vault/add-openshift-secrets.sh
 ```
 
-### What the Script Does
+### What the Scripts Do
 
+**AWS Integration Setup (`setup-aws-integration.sh`):**
+1. ✅ **Validates Vault connectivity** - Ensures Vault is accessible
+2. ✅ **Enables AWS secrets engine** - Sets up dynamic credential generation
+3. ✅ **Configures AWS root credentials** - Stores AWS access keys securely
+4. ✅ **Creates OpenShift installer role** - IAM role with required permissions
+5. ✅ **Tests dynamic credentials** - Validates credential generation works
+
+**OpenShift Secrets Setup (`add-openshift-secrets.sh`):**
 1. ✅ **Validates Vault connectivity** - Ensures Vault is accessible
 2. ✅ **Enables KV secrets engine** - Sets up `secret/` path if needed
 3. ✅ **Adds pull secret** - Reads from `~/pull-secret.json` and stores in Vault
@@ -257,7 +274,7 @@ Enterprise-grade HashiCorp Vault High Availability deployment on OpenShift with 
 ### 🚀 Quick Start
 
 ```bash
-# Complete 3-step Vault HA deployment
+# Complete 5-step Vault HA deployment with AWS integration
 export VAULT_NAMESPACE="vault-production"
 
 # Step 1: Deploy infrastructure (3-5 minutes)
@@ -271,9 +288,15 @@ export VAULT_NAMESPACE="vault-production"
 # Step 3: Verify and score (1-2 minutes)
 ./verify_vault_deployment.sh
 # If script hangs, manually verify: for pod in vault-0 vault-1 vault-2; do oc exec $pod -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status" | grep -E "(Initialized|Sealed|HA Mode)"; done
+
+# Step 4: Configure AWS credentials in Vault (2-3 minutes)
+./scripts/vault/setup-aws-integration.sh
+
+# Step 5: Add OpenShift secrets to Vault (1-2 minutes)
+./scripts/vault/add-openshift-secrets.sh
 ```
 
-**Expected time:** 6-10 minutes total
+**Expected time:** 10-15 minutes total
 **Expected score:** 95/100
 
 ### ⚠️ Script Hanging Issues (macOS/Linux)
@@ -324,8 +347,11 @@ oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=
 - **`direct_vault_init.sh`** - Vault initialization and unsealing (**REQUIRED after deployment**)
 - **`verify_vault_deployment.sh`** - Deployment verification and scoring
 
-**Configuration Scripts:**
-- **`scripts/vault/add-openshift-secrets.sh`** - **REQUIRED**: Add OpenShift secrets to Vault
+**Configuration Scripts (run in order after Step 3):**
+- **`scripts/vault/setup-aws-integration.sh`** - **REQUIRED**: Configure AWS credentials and secrets engine in Vault
+- **`scripts/vault/add-openshift-secrets.sh`** - **REQUIRED**: Add OpenShift secrets to Vault (run after AWS setup)
+
+**TLS and Troubleshooting Scripts:**
 - **`apply-vault-cert-manager.sh`** - TLS certificate management with cert-manager
 - **`ensure-all-pods-unsealed.sh`** - Automated pod unsealing for HA cluster completion
 - **`fix-vault-tls-configuration.sh`** - Comprehensive TLS configuration fix and validation
