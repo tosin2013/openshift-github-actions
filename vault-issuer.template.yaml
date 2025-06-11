@@ -1,0 +1,11 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-selfsigned-issuer
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: tls-issuer
+    app.kubernetes.io/managed-by: cert-manager
+spec:
+  selfSigned: {}
