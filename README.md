@@ -265,9 +265,12 @@ export VAULT_NAMESPACE="vault-production"
 
 # Step 2: Initialize and unseal (2-3 minutes)
 ./direct_vault_init.sh
+# If script hangs, manually verify: oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status"
+# If pods sealed, run: ./ensure-all-pods-unsealed.sh
 
 # Step 3: Verify and score (1-2 minutes)
 ./verify_vault_deployment.sh
+# If script hangs, manually verify: for pod in vault-0 vault-1 vault-2; do oc exec $pod -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status" | grep -E "(Initialized|Sealed|HA Mode)"; done
 ```
 
 **Expected time:** 6-10 minutes total
