@@ -32,9 +32,17 @@ This repository contains GitHub Actions workflows for automating OpenShift 4.18 
 
 2. **Deploy HashiCorp Vault (if needed)**
    ```bash
-   # Deploy Vault HA cluster with TLS
-   export VAULT_NAMESPACE="vault-test-pragmatic"
+   # Deploy Vault HA cluster with TLS (3-step process)
+   export VAULT_NAMESPACE="vault-production"
+
+   # Step 1: Deploy Vault infrastructure with TLS
    ./deploy_vault_ha_tls_complete.sh
+
+   # Step 2: Initialize and unseal Vault cluster
+   ./direct_vault_init.sh
+
+   # Step 3: Verify deployment and get score
+   ./verify_vault_deployment.sh
    ```
 
 3. **Prepare OpenShift Pull Secret**
@@ -249,12 +257,50 @@ Enterprise-grade HashiCorp Vault High Availability deployment on OpenShift with 
 ### 🚀 Quick Start
 
 ```bash
+# Complete 3-step Vault HA deployment
 export VAULT_NAMESPACE="vault-production"
-./deploy_vault_ha_tls_complete.sh && ./verify_vault_deployment.sh
+
+# Step 1: Deploy infrastructure (3-5 minutes)
+./deploy_vault_ha_tls_complete.sh
+
+# Step 2: Initialize and unseal (2-3 minutes)
+./direct_vault_init.sh
+
+# Step 3: Verify and score (1-2 minutes)
+./verify_vault_deployment.sh
 ```
 
-**Expected time:** 8-10 minutes
+**Expected time:** 6-10 minutes total
 **Expected score:** 95/100
+
+### ⚠️ Script Hanging Issues (macOS/Linux)
+
+If scripts hang during status checks, use these manual steps:
+
+```bash
+# If Step 2 hangs, manually verify and complete:
+# 1. Check current status
+oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status"
+
+# 2. If pods are sealed, run automated unsealing
+./ensure-all-pods-unsealed.sh
+
+# 3. Verify all pods are unsealed
+for pod in vault-0 vault-1 vault-2; do
+  echo "=== $pod ==="
+  oc exec $pod -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status" | grep -E "(Initialized|Sealed|HA Mode)"
+done
+
+# If Step 3 hangs, manually verify deployment:
+# 1. Check external access
+VAULT_ROUTE=$(oc get route vault -n $VAULT_NAMESPACE -o jsonpath='{.spec.host}')
+curl -k -s "https://$VAULT_ROUTE/v1/sys/health" | jq '.initialized, .sealed'
+
+# 2. Verify HA cluster status
+oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status" | grep "HA Mode"
+```
+
+**Note:** Scripts may hang on status detection but infrastructure works correctly. Use Ctrl+C to cancel hanging scripts and verify manually.
 
 ### 📚 Documentation
 
@@ -270,18 +316,32 @@ export VAULT_NAMESPACE="vault-production"
 
 ### 🎯 Key Scripts
 
+**Core Deployment Scripts (run in order):**
 - **`deploy_vault_ha_tls_complete.sh`** - Main Vault HA deployment automation
-- **`scripts/vault/add-openshift-secrets.sh`** - **REQUIRED**: Add OpenShift secrets to Vault
-- **`direct_vault_init.sh`** - Vault initialization and unsealing
+- **`direct_vault_init.sh`** - Vault initialization and unsealing (**REQUIRED after deployment**)
 - **`verify_vault_deployment.sh`** - Deployment verification and scoring
+
+**Configuration Scripts:**
+- **`scripts/vault/add-openshift-secrets.sh`** - **REQUIRED**: Add OpenShift secrets to Vault
+- **`apply-vault-cert-manager.sh`** - TLS certificate management with cert-manager
+- **`ensure-all-pods-unsealed.sh`** - Automated pod unsealing for HA cluster completion
+- **`fix-vault-tls-configuration.sh`** - Comprehensive TLS configuration fix and validation
 
 ### 🏗️ Architecture
 
-**Two-Phase Deployment Methodology:**
-1. **Infrastructure Setup** - Deploy pods, services, routes with HTTP
-2. **TLS Upgrade** - Automatic ConfigMap patching and pod restart
-3. **Vault Operations** - Initialize, unseal, and form HA cluster
-4. **Verification** - Comprehensive testing and scoring
+**Three-Phase Deployment Methodology:**
+1. **Infrastructure Setup** (`deploy_vault_ha_tls_complete.sh`)
+   - Deploy pods, services, routes with HTTP
+   - TLS upgrade with automatic ConfigMap patching and pod restart
+   - cert-manager certificate generation
+2. **Vault Operations** (`direct_vault_init.sh`)
+   - Initialize Vault cluster with 5 unseal keys
+   - Unseal leader and standby nodes
+   - Form HA Raft cluster
+3. **Verification** (`verify_vault_deployment.sh`)
+   - Comprehensive testing and scoring
+   - External access validation
+   - HA cluster health checks
 
 See [ADR-001](docs/adrs/001-two-phase-vault-deployment.md) for detailed technical decisions.
 
@@ -293,11 +353,86 @@ See [ADR-001](docs/adrs/001-two-phase-vault-deployment.md) for detailed technica
 - **External Access**: 100% success (UI accessible via HTTPS)
 - **Overall Score**: 95/100
 
-### 🔧 Support
+### 🔧 Troubleshooting Common Issues
 
-- **[Troubleshooting Guide](docs/troubleshooting/)** - Common issues and solutions
+**1. Script Hanging During Status Checks**
+```bash
+# If direct_vault_init.sh hangs:
+# 1. Cancel with Ctrl+C
+# 2. Check if Vault is already initialized
+oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status"
+
+# 3. If sealed, run automated unsealing
+./ensure-all-pods-unsealed.sh
+
+# If verify_vault_deployment.sh hangs:
+# 1. Cancel with Ctrl+C
+# 2. Manual verification
+for pod in vault-0 vault-1 vault-2; do
+  oc exec $pod -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status" | grep -E "(Initialized|Sealed|HA Mode)"
+done
+```
+
+**2. TLS Configuration Issues**
+```bash
+# Check TLS secret exists
+oc get secret vault-tls -n $VAULT_NAMESPACE
+
+# Verify certificate
+oc get certificate vault-tls -n $VAULT_NAMESPACE -o yaml
+
+# Fix TLS configuration comprehensively
+./fix-vault-tls-configuration.sh
+
+# Check Vault logs for TLS errors
+oc logs vault-0 -n $VAULT_NAMESPACE
+```
+
+**3. Vault Initialization Fails**
+```bash
+# Check if Vault is already initialized (with proper TLS)
+oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault status"
+
+# Manual initialization if needed
+oc exec vault-0 -n $VAULT_NAMESPACE -- sh -c "VAULT_SKIP_VERIFY=true VAULT_ADDR=https://localhost:8200 vault operator init"
+
+# Ensure all pods are unsealed after initialization
+./ensure-all-pods-unsealed.sh
+```
+
+**4. ClusterRoleBinding Conflicts**
+```bash
+# Clean up existing bindings
+oc delete clusterrolebinding vault-server-binding
+
+# Re-run deployment
+./deploy_vault_ha_tls_complete.sh
+```
+
+**5. Pods Not Starting**
+```bash
+# Check pod status and events
+oc get pods -n $VAULT_NAMESPACE
+oc describe pod vault-0 -n $VAULT_NAMESPACE
+
+# Check SCC permissions
+oc get scc vault-scc
+
+# Check TLS certificate availability
+oc get secret vault-tls -n $VAULT_NAMESPACE
+```
+
+### 📚 Additional Documentation
+
+**Deployment Guides:**
+- **[Complete Vault Deployment Guide](docs/guides/vault-deployment-complete.md)** - **COMPREHENSIVE**: Full deployment process
+- **[Phase 1 AWS Implementation](docs/guides/phase1-aws-implementation.md)** - AWS integration guide
+- **[Quick Start](docs/guides/quick-start.md)** - Basic deployment steps
+
+**Troubleshooting:**
+- **[Troubleshooting Guide](docs/troubleshooting/)** - General issue resolution
+- **[cert-manager Issues](docs/troubleshooting/cert-manager-issues.md)** - Certificate problems
 - **[Architecture Details](docs/adrs/)** - Technical decisions and methodology
-- **[Quick Start](docs/guides/quick-start.md)** - Step-by-step deployment guide
 
 ---
 

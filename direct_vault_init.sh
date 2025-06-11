@@ -94,28 +94,93 @@ verify_tls_certificates() {
   return 0
 }
 
+# Function to detect Vault protocol (HTTP vs HTTPS)
+detect_vault_protocol() {
+  local pod=$1
+  vault_log "Detecting Vault protocol on $pod"
+
+  # Try HTTPS first with timeout (fallback for macOS)
+  if (command -v timeout >/dev/null 2>&1 && timeout 10 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=true && export VAULT_ADDR=https://localhost:8200 && vault status" >/dev/null 2>&1) || \
+     (command -v gtimeout >/dev/null 2>&1 && gtimeout 10 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=true && export VAULT_ADDR=https://localhost:8200 && vault status" >/dev/null 2>&1) || \
+     oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=true && export VAULT_ADDR=https://localhost:8200 && vault status" >/dev/null 2>&1; then
+    vault_log "HTTPS protocol detected on $pod"
+    echo "https://localhost:8200"
+    return 0
+  fi
+
+  # Try HTTP if HTTPS fails with timeout (fallback for macOS)
+  if (command -v timeout >/dev/null 2>&1 && timeout 10 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=http://localhost:8200 && vault status" >/dev/null 2>&1) || \
+     (command -v gtimeout >/dev/null 2>&1 && gtimeout 10 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=http://localhost:8200 && vault status" >/dev/null 2>&1) || \
+     oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=http://localhost:8200 && vault status" >/dev/null 2>&1; then
+    vault_log "HTTP protocol detected on $pod"
+    echo "http://localhost:8200"
+    return 0
+  fi
+
+  # Default to HTTPS if both fail (might be initialization issue)
+  vault_log "Protocol detection failed, defaulting to HTTPS on $pod"
+  echo "https://localhost:8200"
+  return 1
+}
+
 # Function to check Vault status
 check_vault_status() {
   local pod=$1
   vault_log "Checking Vault status on $pod"
-  
+
+  # Detect the correct protocol with timeout
+  local vault_addr
+  vault_addr=$(detect_vault_protocol "$pod")
+  vault_log "Using Vault address: $vault_addr"
+
   local status_output
-  status_output=$(oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=https://localhost:8200 && vault status -format=json -tls-skip-verify" 2>/dev/null)
-  local exit_code=$?
-  
-  # Vault status command returns exit code 2 when sealed, which is still valid for our purposes
-  if [ $exit_code -ne 0 ] && [ $exit_code -ne 2 ]; then
-    vault_log "Warning: Could not get Vault status on $pod"
+  local exit_code
+
+  # Add timeout and better error handling (with macOS fallback)
+  if [[ "$vault_addr" == "https://"* ]]; then
+    if command -v timeout >/dev/null 2>&1; then
+      status_output=$(timeout 15 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault status -format=json -tls-skip-verify" 2>/dev/null)
+      exit_code=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+      status_output=$(gtimeout 15 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault status -format=json -tls-skip-verify" 2>/dev/null)
+      exit_code=$?
+    else
+      status_output=$(oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault status -format=json -tls-skip-verify" 2>/dev/null)
+      exit_code=$?
+    fi
+  else
+    if command -v timeout >/dev/null 2>&1; then
+      status_output=$(timeout 15 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault status -format=json" 2>/dev/null)
+      exit_code=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+      status_output=$(gtimeout 15 oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault status -format=json" 2>/dev/null)
+      exit_code=$?
+    else
+      status_output=$(oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault status -format=json" 2>/dev/null)
+      exit_code=$?
+    fi
+  fi
+
+  # Handle timeout
+  if [ $exit_code -eq 124 ]; then
+    vault_log "Warning: Timeout checking Vault status on $pod"
     return 1
   fi
-  
-  # Check if we got valid JSON output
-  if echo "$status_output" | sed -n '/^{/,/^}$/p' | jq -e . >/dev/null 2>&1; then
+
+  # Vault status command returns exit code 2 when sealed, which is still valid for our purposes
+  if [ $exit_code -ne 0 ] && [ $exit_code -ne 2 ]; then
+    vault_log "Warning: Could not get Vault status on $pod (exit code: $exit_code)"
+    return 1
+  fi
+
+  # Check if we got valid JSON output with better parsing
+  if [ -n "$status_output" ] && echo "$status_output" | jq -e . >/dev/null 2>&1; then
     vault_log "Successfully retrieved Vault status from $pod"
     echo "$status_output"
     return 0
   else
-    vault_log "Warning: Invalid status output from $pod"
+    vault_log "Warning: Invalid or empty status output from $pod"
+    vault_log "Raw output: ${status_output:0:200}..."
     return 1
   fi
 }
@@ -123,10 +188,19 @@ check_vault_status() {
 # Function to initialize Vault
 initialize_vault() {
   vault_log "Initializing Vault on $VAULT_LEADER_POD"
-  
+
+  # Detect the correct protocol
+  local vault_addr
+  vault_addr=$(detect_vault_protocol "$VAULT_LEADER_POD")
+  vault_log "Using Vault address for initialization: $vault_addr"
+
   # Run vault operator init
   local init_output
-  init_output=$(oc exec $VAULT_LEADER_POD -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=https://localhost:8200 && vault operator init -key-shares=5 -key-threshold=3 -format=json -tls-skip-verify" 2>/dev/null)
+  if [[ "$vault_addr" == "https://"* ]]; then
+    init_output=$(oc exec $VAULT_LEADER_POD -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault operator init -key-shares=5 -key-threshold=3 -format=json -tls-skip-verify" 2>/dev/null)
+  else
+    init_output=$(oc exec $VAULT_LEADER_POD -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault operator init -key-shares=5 -key-threshold=3 -format=json" 2>/dev/null)
+  fi
   local exit_code=$?
   
   if [ $exit_code -ne 0 ]; then
@@ -184,15 +258,32 @@ unseal_vault() {
     fi
   fi
   
+  # Detect the correct protocol for unsealing
+  local vault_addr
+  vault_addr=$(detect_vault_protocol "$pod")
+  vault_log "Using Vault address for unsealing: $vault_addr"
+
   # Apply unseal keys
   vault_log "Applying unseal key 1"
-  oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=https://localhost:8200 && vault operator unseal -tls-skip-verify $UNSEAL_KEY_1" > /dev/null
-  
+  if [[ "$vault_addr" == "https://"* ]]; then
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault operator unseal -tls-skip-verify $UNSEAL_KEY_1" > /dev/null
+  else
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault operator unseal $UNSEAL_KEY_1" > /dev/null
+  fi
+
   vault_log "Applying unseal key 2"
-  oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=https://localhost:8200 && vault operator unseal -tls-skip-verify $UNSEAL_KEY_2" > /dev/null
-  
+  if [[ "$vault_addr" == "https://"* ]]; then
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault operator unseal -tls-skip-verify $UNSEAL_KEY_2" > /dev/null
+  else
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault operator unseal $UNSEAL_KEY_2" > /dev/null
+  fi
+
   vault_log "Applying unseal key 3"
-  oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=https://localhost:8200 && vault operator unseal -tls-skip-verify $UNSEAL_KEY_3" > /dev/null
+  if [[ "$vault_addr" == "https://"* ]]; then
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_SKIP_VERIFY=$TLS_SKIP_VERIFY && export VAULT_ADDR=$vault_addr && vault operator unseal -tls-skip-verify $UNSEAL_KEY_3" > /dev/null
+  else
+    oc exec $pod -n $NAMESPACE -- sh -c "export VAULT_ADDR=$vault_addr && vault operator unseal $UNSEAL_KEY_3" > /dev/null
+  fi
   
   # Verify unsealed
   status_output=$(check_vault_status "$pod")
@@ -219,23 +310,43 @@ verify_tls_certificates || {
   exit 1
 }
 
-# Check if Vault is already initialized
+# Check if Vault is already initialized with retry logic
 vault_log "Checking Vault initialization status on $VAULT_LEADER_POD"
-STATUS_OUTPUT=$(check_vault_status "$VAULT_LEADER_POD")
 
-if [ $? -ne 0 ]; then
-  vault_log "ERROR: Could not check Vault initialization status"
+# Retry logic for status check
+max_retries=3
+retry_count=0
+STATUS_OUTPUT=""
+
+while [ $retry_count -lt $max_retries ]; do
+  vault_log "Attempt $((retry_count + 1))/$max_retries to check Vault status"
+  STATUS_OUTPUT=$(check_vault_status "$VAULT_LEADER_POD")
+
+  if [ $? -eq 0 ] && [ -n "$STATUS_OUTPUT" ]; then
+    vault_log "Successfully retrieved Vault status"
+    break
+  fi
+
+  retry_count=$((retry_count + 1))
+  if [ $retry_count -lt $max_retries ]; then
+    vault_log "Retrying in 5 seconds..."
+    sleep 5
+  fi
+done
+
+if [ $retry_count -eq $max_retries ]; then
+  vault_log "ERROR: Could not check Vault initialization status after $max_retries attempts"
+  vault_log "This might indicate a connectivity or configuration issue"
   exit 1
 fi
 
-# Extract JSON from mixed output (log messages + JSON)
-# First extract just the JSON part, then use jq for parsing
-JSON_OUTPUT=$(echo "$STATUS_OUTPUT" | sed -n '/^{/,/^}$/p' | jq -c '.' 2>/dev/null)
-vault_log "Extracted JSON: ${JSON_OUTPUT:0:200}..."
+# Parse JSON output directly (check_vault_status now returns clean JSON)
+JSON_OUTPUT="$STATUS_OUTPUT"
+vault_log "Vault status JSON: ${JSON_OUTPUT:0:200}..."
 
-# Check if we have valid JSON
-if [ -z "$JSON_OUTPUT" ]; then
-  vault_log "ERROR: Could not extract JSON from Vault status output"
+# Validate JSON
+if ! echo "$JSON_OUTPUT" | jq -e . >/dev/null 2>&1; then
+  vault_log "ERROR: Invalid JSON from Vault status output"
   vault_log "Raw output: $STATUS_OUTPUT"
   exit 1
 fi
@@ -504,7 +615,22 @@ done
 if [ "$ALL_UNSEALED" == "true" ]; then
   vault_log "SUCCESS: All Vault pods are unsealed and the HA cluster is fully operational."
 else
-  vault_log "WARNING: Not all Vault pods are unsealed. The HA cluster may not be fully operational."
+  vault_log "WARNING: Not all Vault pods are unsealed. Running automated unsealing fix..."
+
+  # Run the automated unsealing script
+  if [[ -f "ensure-all-pods-unsealed.sh" ]]; then
+    vault_log "Running ensure-all-pods-unsealed.sh to fix unsealing issues..."
+    export VAULT_NAMESPACE="$NAMESPACE"
+    ./ensure-all-pods-unsealed.sh
+
+    if [[ $? -eq 0 ]]; then
+      vault_log "✅ Automated unsealing completed successfully!"
+    else
+      vault_log "⚠️  Automated unsealing partially successful. Some manual intervention may be needed."
+    fi
+  else
+    vault_log "ensure-all-pods-unsealed.sh not found. Manual unsealing may be required."
+  fi
 fi
 
-vault_log "Troubleshooting completed. Vault HA cluster setup process has finished."
+vault_log "Vault HA cluster setup process completed."

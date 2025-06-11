@@ -1,0 +1,82 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: tls-certificate
+    app.kubernetes.io/managed-by: cert-manager
+spec:
+  secretName: vault-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiration
+  subject:
+    organizations:
+      - HashiCorp
+    organizationalUnits:
+      - Vault
+    countries:
+      - US
+  commonName: vault.${NAMESPACE}.svc.cluster.local
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+    - digital signature
+    - key encipherment
+  dnsNames:
+    # External OpenShift route access
+    - vault-${NAMESPACE}.${DOMAIN}
+    - vault.${DOMAIN}
+    
+    # Internal Kubernetes service names
+    - vault
+    - vault.${NAMESPACE}
+    - vault.${NAMESPACE}.svc
+    - vault.${NAMESPACE}.svc.cluster.local
+    - vault-active
+    - vault-active.${NAMESPACE}
+    - vault-active.${NAMESPACE}.svc
+    - vault-active.${NAMESPACE}.svc.cluster.local
+    - vault-standby
+    - vault-standby.${NAMESPACE}
+    - vault-standby.${NAMESPACE}.svc
+    - vault-standby.${NAMESPACE}.svc.cluster.local
+    - vault-internal
+    - vault-internal.${NAMESPACE}
+    - vault-internal.${NAMESPACE}.svc
+    - vault-internal.${NAMESPACE}.svc.cluster.local
+    
+    # Individual StatefulSet pod names for HA communication
+    - vault-0
+    - vault-1
+    - vault-2
+    - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
+    - vault-0.vault-internal.${NAMESPACE}
+    - vault-1.vault-internal.${NAMESPACE}
+    - vault-2.vault-internal.${NAMESPACE}
+    - vault-0.vault-internal.${NAMESPACE}.svc
+    - vault-1.vault-internal.${NAMESPACE}.svc
+    - vault-2.vault-internal.${NAMESPACE}.svc
+    - vault-0.vault-internal.${NAMESPACE}.svc.cluster.local
+    - vault-1.vault-internal.${NAMESPACE}.svc.cluster.local
+    - vault-2.vault-internal.${NAMESPACE}.svc.cluster.local
+    
+    # Localhost and loopback for internal pod communication
+    - localhost
+    - 127.0.0.1
+    - ::1
+  ipAddresses:
+    - 127.0.0.1
+    - ::1
+  issuerRef:
+    name: vault-selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io

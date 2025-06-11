@@ -81,8 +81,34 @@ test_tls_certificates() {
 
 test_vault_leader() {
   log "Testing Vault leader status..."
-  local vault_status=$(oc exec vault-0 -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null || echo '{}')
-  
+
+  # Check if vault-0 pod exists
+  if ! oc get pod vault-0 -n "$VAULT_NAMESPACE" >/dev/null 2>&1; then
+    error "❌ vault-0 pod not found"
+    return
+  fi
+
+  # Try HTTPS first with timeout, then HTTP
+  local vault_status=""
+  local exit_code=1
+
+  # Try HTTPS with timeout
+  vault_status=$(timeout 10 oc exec vault-0 -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+  exit_code=$?
+
+  # If HTTPS failed or timed out, try HTTP
+  if [[ $exit_code -ne 0 || -z "$vault_status" ]]; then
+    log "HTTPS failed for vault-0, trying HTTP..."
+    vault_status=$(timeout 10 oc exec vault-0 -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json" 2>/dev/null)
+    exit_code=$?
+  fi
+
+  # If both failed, provide default status
+  if [[ $exit_code -ne 0 || -z "$vault_status" ]]; then
+    log "Both HTTPS and HTTP failed for vault-0"
+    vault_status='{"initialized": false, "sealed": true}'
+  fi
+
   local initialized=$(echo "$vault_status" | jq -r '.initialized // false' 2>/dev/null)
   local sealed=$(echo "$vault_status" | jq -r '.sealed // true' 2>/dev/null)
   
@@ -134,24 +160,60 @@ test_external_access() {
 test_ha_cluster() {
   log "Testing HA cluster status..."
   local unsealed_count=0
-  
+  local total_pods=0
+
   for pod in vault-0 vault-1 vault-2; do
-    local status=$(oc exec "$pod" -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null || echo '{"sealed": true}')
+    # Check if pod exists first
+    if ! oc get pod "$pod" -n "$VAULT_NAMESPACE" >/dev/null 2>&1; then
+      log "Pod $pod not found, skipping..."
+      continue
+    fi
+
+    total_pods=$((total_pods + 1))
+    log "Checking status of $pod..."
+
+    # Try HTTPS first with timeout, then HTTP
+    local status=""
+    local exit_code=1
+
+    # Try HTTPS with timeout
+    status=$(timeout 10 oc exec "$pod" -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=https://localhost:8200 VAULT_SKIP_VERIFY=true vault status -format=json" 2>/dev/null)
+    exit_code=$?
+
+    # If HTTPS failed or timed out, try HTTP
+    if [[ $exit_code -ne 0 || -z "$status" ]]; then
+      log "HTTPS failed for $pod, trying HTTP..."
+      status=$(timeout 10 oc exec "$pod" -n "$VAULT_NAMESPACE" -- sh -c "VAULT_ADDR=http://localhost:8200 vault status -format=json" 2>/dev/null)
+      exit_code=$?
+    fi
+
+    # If both failed, mark as sealed
+    if [[ $exit_code -ne 0 || -z "$status" ]]; then
+      log "Both HTTPS and HTTP failed for $pod, marking as sealed"
+      status='{"sealed": true, "initialized": false}'
+    fi
+
+    # Parse sealed status
     local sealed=$(echo "$status" | jq -r '.sealed // true' 2>/dev/null)
-    
+    local initialized=$(echo "$status" | jq -r '.initialized // false' 2>/dev/null)
+
+    log "$pod: initialized=$initialized, sealed=$sealed"
+
     if [[ "$sealed" == "false" ]]; then
       unsealed_count=$((unsealed_count + 1))
     fi
   done
-  
+
+  log "HA cluster status: $unsealed_count/$total_pods pods unsealed"
+
   if [[ $unsealed_count -eq 3 ]]; then
     success "✅ Full HA cluster operational (3/3 nodes unsealed)"
     TOTAL_SCORE=$((TOTAL_SCORE + 10))
-  elif [[ $unsealed_count -eq 1 ]]; then
-    warn "⚠️  Leader-only deployment (1/3 nodes unsealed)"
+  elif [[ $unsealed_count -ge 1 ]]; then
+    warn "⚠️  Partial HA cluster ($unsealed_count/$total_pods nodes unsealed)"
     TOTAL_SCORE=$((TOTAL_SCORE + 5))
   else
-    error "❌ HA cluster not operational"
+    error "❌ HA cluster not operational (0/$total_pods nodes unsealed)"
   fi
 }
 
