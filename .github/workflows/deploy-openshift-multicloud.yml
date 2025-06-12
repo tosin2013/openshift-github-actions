@@ -43,7 +43,7 @@ permissions:
   contents: read    # Required for repository access
 
 env:
-  VAULT_NAMESPACE: vault-test-pragmatic
+  VAULT_NAMESPACE: vault-8q957
   OPENSHIFT_VERSION: "4.18"
 
 jobs:
