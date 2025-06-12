@@ -36,7 +36,7 @@ if ! oc whoami &>/dev/null; then
 fi
 
 # Vault configuration
-VAULT_NAMESPACE="vault-test-pragmatic"
+VAULT_NAMESPACE="${VAULT_NAMESPACE:-vault-test-pragmatic}"
 VAULT_POD="vault-0"
 
 log "Adding OpenShift secrets to Vault..."
