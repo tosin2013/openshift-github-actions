@@ -215,6 +215,113 @@ jobs:
           aws sts get-caller-identity --region ${{ env.REGION }}
           aws ec2 describe-regions --region ${{ env.REGION }}
 
+      - name: Validate Red Hat OpenShift 4.18 Network Requirements
+        run: |
+          echo "🔍 Validating Red Hat OpenShift 4.18 networking requirements..."
+          
+          # Test required AWS endpoint connectivity
+          echo "Testing AWS endpoint connectivity..."
+          REQUIRED_ENDPOINTS=(
+            "ec2.${{ env.REGION }}.amazonaws.com"
+            "sts.${{ env.REGION }}.amazonaws.com" 
+            "route53.amazonaws.com"
+            "elasticloadbalancing.${{ env.REGION }}.amazonaws.com"
+            "s3.${{ env.REGION }}.amazonaws.com"
+          )
+          
+          for endpoint in "${REQUIRED_ENDPOINTS[@]}"; do
+            echo "Testing $endpoint..."
+            if ! curl -s --connect-timeout 10 --max-time 30 "https://$endpoint" >/dev/null 2>&1; then
+              echo "❌ ERROR: Cannot reach required endpoint: $endpoint"
+              echo "This endpoint is required per Red Hat OpenShift 4.18 documentation"
+              exit 1
+            else
+              echo "✅ $endpoint is reachable"
+            fi
+          done
+          
+          # Validate AWS permissions for networking components
+          echo "Validating AWS permissions for networking..."
+          aws ec2 describe-vpcs --region ${{ env.REGION }} --max-items 1 >/dev/null
+          aws ec2 describe-subnets --region ${{ env.REGION }} --max-items 1 >/dev/null
+          aws ec2 describe-security-groups --region ${{ env.REGION }} --max-items 1 >/dev/null
+          aws ec2 describe-route-tables --region ${{ env.REGION }} --max-items 1 >/dev/null
+          echo "✅ AWS networking permissions validated"
+
+      - name: Pre-Configure AWS Networking for OpenShift
+        run: |
+          echo "🔧 Pre-configuring AWS networking per Red Hat requirements..."
+          
+          # Create script for subnet tagging and network setup
+          cat > pre-configure-networking.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          
+          CLUSTER_NAME="$1"
+          REGION="$2"
+          
+          echo "Configuring networking for cluster: $CLUSTER_NAME in region: $REGION"
+          
+          # Function to tag subnets according to Red Hat documentation
+          tag_existing_subnets() {
+            echo "Searching for existing subnets to tag..."
+            
+            # Find subnets that might be created by OpenShift installer
+            # We'll tag them after VPC creation but before cluster creation
+            local vpc_ids=$(aws ec2 describe-vpcs \
+              --filters "Name=tag:Name,Values=*${CLUSTER_NAME}*" \
+              --query 'Vpcs[].VpcId' \
+              --output text \
+              --region "$REGION" 2>/dev/null || echo "")
+            
+            if [[ -n "$vpc_ids" ]]; then
+              echo "Found VPC(s) for cluster: $vpc_ids"
+              
+              for vpc_id in $vpc_ids; do
+                # Tag public subnets
+                local public_subnets=$(aws ec2 describe-subnets \
+                  --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:Name,Values=*public*" \
+                  --query 'Subnets[].SubnetId' \
+                  --output text \
+                  --region "$REGION" 2>/dev/null || echo "")
+                
+                for subnet in $public_subnets; do
+                  echo "Tagging public subnet $subnet with kubernetes.io/role/elb=1"
+                  aws ec2 create-tags \
+                    --resources "$subnet" \
+                    --tags Key=kubernetes.io/role/elb,Value=1 \
+                    --region "$REGION" || echo "Warning: Could not tag $subnet"
+                done
+                
+                # Tag private subnets
+                local private_subnets=$(aws ec2 describe-subnets \
+                  --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:Name,Values=*private*" \
+                  --query 'Subnets[].SubnetId' \
+                  --output text \
+                  --region "$REGION" 2>/dev/null || echo "")
+                
+                for subnet in $private_subnets; do
+                  echo "Tagging private subnet $subnet with kubernetes.io/role/internal-elb=1"
+                  aws ec2 create-tags \
+                    --resources "$subnet" \
+                    --tags Key=kubernetes.io/role/internal-elb,Value=1 \
+                    --region "$REGION" || echo "Warning: Could not tag $subnet"
+                done
+              done
+            else
+              echo "No existing VPCs found for cluster $CLUSTER_NAME (this is normal for new deployments)"
+            fi
+          }
+          
+          # Initial subnet tagging attempt
+          tag_existing_subnets
+          
+          echo "✅ Pre-networking configuration completed"
+          EOF
+          
+          chmod +x pre-configure-networking.sh
+          ./pre-configure-networking.sh "$CLUSTER_NAME" "$REGION"
+
       - name: Prepare SSH key
         run: |
           mkdir -p ~/.ssh
@@ -243,6 +350,95 @@ jobs:
       - name: Deploy OpenShift Cluster
         run: |
           openshift-install create cluster --dir=installation-dir --log-level=info
+
+      - name: Post-Deployment Network Verification
+        run: |
+          echo "🔍 Verifying Red Hat OpenShift 4.18 networking compliance post-deployment..."
+          
+          # Find the VPC created by OpenShift installer
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=*${CLUSTER_NAME}*" \
+            --query 'Vpcs[0].VpcId' \
+            --output text \
+            --region ${{ env.REGION }})
+          
+          if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
+            echo "✅ Found cluster VPC: $VPC_ID"
+            
+            # Verify subnet tagging compliance
+            echo "Verifying subnet tagging compliance..."
+            
+            # Check public subnets have correct tags
+            PUBLIC_SUBNETS=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*public*" \
+              --query 'Subnets[].SubnetId' \
+              --output text \
+              --region ${{ env.REGION }})
+            
+            for subnet in $PUBLIC_SUBNETS; do
+              TAG_VALUE=$(aws ec2 describe-tags \
+                --filters "Name=resource-id,Values=$subnet" "Name=key,Values=kubernetes.io/role/elb" \
+                --query 'Tags[0].Value' \
+                --output text \
+                --region ${{ env.REGION }} 2>/dev/null || echo "None")
+              
+              if [[ "$TAG_VALUE" == "1" ]]; then
+                echo "✅ Public subnet $subnet correctly tagged"
+              else
+                echo "⚠️ Public subnet $subnet missing kubernetes.io/role/elb tag, applying now..."
+                aws ec2 create-tags \
+                  --resources "$subnet" \
+                  --tags Key=kubernetes.io/role/elb,Value=1 \
+                  --region ${{ env.REGION }}
+              fi
+            done
+            
+            # Check private subnets have correct tags
+            PRIVATE_SUBNETS=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*private*" \
+              --query 'Subnets[].SubnetId' \
+              --output text \
+              --region ${{ env.REGION }})
+            
+            for subnet in $PRIVATE_SUBNETS; do
+              TAG_VALUE=$(aws ec2 describe-tags \
+                --filters "Name=resource-id,Values=$subnet" "Name=key,Values=kubernetes.io/role/internal-elb" \
+                --query 'Tags[0].Value' \
+                --output text \
+                --region ${{ env.REGION }} 2>/dev/null || echo "None")
+              
+              if [[ "$TAG_VALUE" == "1" ]]; then
+                echo "✅ Private subnet $subnet correctly tagged"
+              else
+                echo "⚠️ Private subnet $subnet missing kubernetes.io/role/internal-elb tag, applying now..."
+                aws ec2 create-tags \
+                  --resources "$subnet" \
+                  --tags Key=kubernetes.io/role/internal-elb,Value=1 \
+                  --region ${{ env.REGION }}
+              fi
+            done
+            
+            # Verify load balancer functionality
+            export KUBECONFIG=installation-dir/auth/kubeconfig
+            echo "Testing load balancer creation..."
+            
+            # Wait for cluster operators to be ready
+            echo "Waiting for ingress operator..."
+            oc wait --for=condition=Available=True clusteroperator/ingress --timeout=300s || echo "Warning: Ingress operator not ready"
+            
+            # Check router deployment
+            ROUTER_LB=$(oc get service router-default -n openshift-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [[ -n "$ROUTER_LB" ]]; then
+              echo "✅ Load balancer created successfully: $ROUTER_LB"
+            else
+              echo "⚠️ Load balancer not yet ready (this may be normal for new deployments)"
+            fi
+            
+            echo "✅ Network verification completed"
+          else
+            echo "❌ Could not find cluster VPC - deployment may have failed"
+            exit 1
+          fi
 
       - name: Save cluster credentials
         run: |
@@ -293,7 +489,137 @@ jobs:
       - name: Cleanup on failure
         if: failure()
         run: |
+          echo "🔍 Analyzing failure for networking issues..."
+          
+          # Capture networking state for debugging
+          echo "=== AWS Networking State ==="
+          
+          # Find VPC if it exists
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=*${CLUSTER_NAME}*" \
+            --query 'Vpcs[0].VpcId' \
+            --output text \
+            --region ${{ env.REGION }} 2>/dev/null || echo "None")
+          
+          if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
+            echo "VPC ID: $VPC_ID"
+            
+            # Check subnet configuration
+            echo "=== Subnet Configuration ==="
+            aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=$VPC_ID" \
+              --query 'Subnets[*].[SubnetId,AvailabilityZone,CidrBlock,Tags[?Key==`Name`].Value|[0],Tags[?Key==`kubernetes.io/role/elb`].Value|[0],Tags[?Key==`kubernetes.io/role/internal-elb`].Value|[0]]' \
+              --output table \
+              --region ${{ env.REGION }} || echo "Could not retrieve subnet info"
+            
+            # Check security groups
+            echo "=== Security Groups ==="
+            aws ec2 describe-security-groups \
+              --filters "Name=vpc-id,Values=$VPC_ID" \
+              --query 'SecurityGroups[*].[GroupId,GroupName,Description]' \
+              --output table \
+              --region ${{ env.REGION }} || echo "Could not retrieve security group info"
+            
+            # Check route tables
+            echo "=== Route Tables ==="
+            aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=$VPC_ID" \
+              --query 'RouteTables[*].[RouteTableId,Tags[?Key==`Name`].Value|[0],Routes[0].GatewayId]' \
+              --output table \
+              --region ${{ env.REGION }} || echo "Could not retrieve route table info"
+            
+            # Check NAT gateways
+            echo "=== NAT Gateways ==="
+            aws ec2 describe-nat-gateways \
+              --filter "Name=vpc-id,Values=$VPC_ID" \
+              --query 'NatGateways[*].[NatGatewayId,State,SubnetId]' \
+              --output table \
+              --region ${{ env.REGION }} || echo "Could not retrieve NAT gateway info"
+          fi
+          
+          # Check installation logs for networking errors
+          if [[ -f "installation-dir/.openshift_install.log" ]]; then
+            echo "=== Installation Log Networking Errors ==="
+            grep -i -A 5 -B 5 "network\|subnet\|security.*group\|load.*balancer\|route.*table\|nat.*gateway" \
+              installation-dir/.openshift_install.log | tail -50 || echo "No networking errors found in logs"
+          fi
+          
+          # Create a networking debug report
+          cat > networking-debug-report.md << EOF
+          # AWS Networking Debug Report
+          
+          **Cluster Name**: $CLUSTER_NAME
+          **Region**: ${{ env.REGION }}
+          **Failure Time**: $(date)
+          **VPC ID**: $VPC_ID
+          
+          ## Red Hat OpenShift 4.18 Compliance Issues
+          
+          The deployment failed. Based on our analysis, this could be due to:
+          
+          1. **Missing Subnet Tags**: Required kubernetes.io/role/elb and kubernetes.io/role/internal-elb tags
+          2. **Security Group Rules**: May not follow Red Hat documentation requirements
+          3. **VPC Endpoint Issues**: Missing STS/S3 endpoints for private deployments
+          4. **AWS Service Connectivity**: Issues reaching required AWS endpoints
+          
+          ## Recommended Actions
+          
+          1. Review the networking state captured above
+          2. Verify subnet tagging compliance
+          3. Check security group rules allow traffic on required ports
+          4. Ensure NAT gateways are properly configured for outbound traffic
+          5. Validate AWS endpoint connectivity
+          
+          ## Network Validation Commands
+          
+          Run these commands to validate your AWS networking setup:
+          
+          \`\`\`bash
+          # Check subnet tags
+          aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].[SubnetId,Tags]'
+          
+          # Verify security group rules
+          aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[*].[GroupId,IpPermissions]'
+          
+          # Test AWS endpoint connectivity
+          curl -I https://ec2.${{ env.REGION }}.amazonaws.com
+          curl -I https://sts.${{ env.REGION }}.amazonaws.com
+          \`\`\`
+          EOF
+          
+          echo "✅ Networking debug report created: networking-debug-report.md"
+          
+          # Proceed with cleanup
           ./scripts/aws/cleanup-failed-deployment.sh \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --force
+
+      - name: Upload networking debug report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-networking-debug-${{ env.CLUSTER_NAME }}
+          path: networking-debug-report.md
+
+      - name: Upload installation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-installation-logs-${{ env.CLUSTER_NAME }}
+          path: installation-dir/.openshift_install.log
+
+      - name: Upload kubeconfig
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-kubeconfig-${{ env.CLUSTER_NAME }}
+          path: installation-dir/auth/kubeconfig
+
+      - name: Cleanup resources
+        if: always()
+        run: |
+          ./scripts/aws/cleanup.sh \
             --cluster-name "$CLUSTER_NAME" \
             --region "$REGION" \
             --force
