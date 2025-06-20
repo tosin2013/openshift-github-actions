@@ -116,14 +116,25 @@ node test-server.js
 #### Claude Desktop Integration
 Add to your Claude Desktop MCP configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
+**Get the absolute path first:**
+```bash
+cd openshift-github-actions-repo-helper-mcp-server
+pwd
+# Example output: /home/user/openshift-github-actions/openshift-github-actions-repo-helper-mcp-server
+```
+
+**Then use the full path in your configuration:**
 ```json
 {
   "mcpServers": {
     "openshift-github-actions-repo-helper": {
       "command": "node",
-      "args": ["/absolute/path/to/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
+      "args": ["/home/user/openshift-github-actions/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
       "env": {
-        "LOG_LEVEL": "1"
+        "LOG_LEVEL": "1",
+        "REDHAT_AI_ENDPOINT": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+        "REDHAT_AI_MODEL": "granite-8b-code-instruct-128k",
+        "REDHAT_AI_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -139,8 +150,60 @@ Add to your Claude Desktop MCP configuration (`~/Library/Application Support/Cla
       "args": ["/path/to/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
       "env": {
         "LOG_LEVEL": "1",
-        "REDHAT_AI_ENDPOINT": "https://maas.apps.prod.rhoai.rh-aiservices-bu.com/",
-        "REDHAT_AI_MODEL": "redhat-openshift-ai"
+        "REDHAT_AI_ENDPOINT": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+        "REDHAT_AI_MODEL": "granite-8b-code-instruct-128k",
+        "REDHAT_AI_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+#### Alternative Configuration Options
+
+**Option 1: Basic MCP Server (without AI)**
+```json
+{
+  "mcpServers": {
+    "openshift-github-actions-repo-helper": {
+      "command": "node",
+      "args": ["/path/to/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
+      "env": {
+        "LOG_LEVEL": "1"
+      }
+    }
+  }
+}
+```
+
+**Option 2: With Red Hat AI Services (Granite)**
+```json
+{
+  "mcpServers": {
+    "openshift-github-actions-repo-helper": {
+      "command": "node",
+      "args": ["/path/to/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
+      "env": {
+        "LOG_LEVEL": "1",
+        "REDHAT_AI_ENDPOINT": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+        "REDHAT_AI_MODEL": "granite-8b-code-instruct-128k",
+        "REDHAT_AI_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+**Option 3: Using Config File**
+```json
+{
+  "mcpServers": {
+    "openshift-github-actions-repo-helper": {
+      "command": "node",
+      "args": ["/path/to/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
+      "env": {
+        "LOG_LEVEL": "1",
+        "CONFIG_FILE": "/path/to/config-granite.json"
       }
     }
   }

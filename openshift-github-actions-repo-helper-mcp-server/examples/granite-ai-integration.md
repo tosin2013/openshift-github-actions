@@ -45,8 +45,10 @@ Create or update `config-granite.json`:
 ```bash
 export REDHAT_AI_ENDPOINT="https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443"
 export REDHAT_AI_MODEL="granite-8b-code-instruct-128k"
-export REDHAT_AI_API_KEY="your-api-key-here"
+export REDHAT_AI_API_KEY="your-actual-api-key-here"
 ```
+
+**Note**: Replace `your-actual-api-key-here` with your real API key from Red Hat AI Services.
 
 ### 3. Start the MCP server with Granite configuration
 
