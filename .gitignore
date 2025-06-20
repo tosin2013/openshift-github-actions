@@ -22,7 +22,8 @@ __pycache__/
 *.pyc
 
 # IDE files
-.vscode/
+.vscode/settings.json
+.vscode/mcp.json
 .idea/
 *.swp
 *.swo
@@ -31,5 +32,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-.vscode/mcp.json
+# Additional project files
 notes.md

@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "openshift-github-actions-repo-helper": {
+      "command": "node",
+      "args": ["/home/ec2-user/openshift-github-actions/openshift-github-actions-repo-helper-mcp-server/dist/index.js"],
+      "env": {
+        "LOG_LEVEL": "1",
+        "REDHAT_AI_ENDPOINT": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+        "REDHAT_AI_MODEL": "granite-8b-code-instruct-128k",
+        "REDHAT_AI_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}
