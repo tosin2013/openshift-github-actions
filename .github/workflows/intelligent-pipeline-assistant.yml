@@ -181,6 +181,63 @@ jobs:
             exit 1
           fi
 
+      - name: Generate AI-enhanced analysis
+        if: inputs.ai_enhanced == true
+        run: |
+          # Call Red Hat AI Services (Granite) for enhanced analysis
+          if [[ -n "${{ secrets.REDHAT_AI_API_KEY }}" ]]; then
+            echo "🤖 Calling Red Hat AI Services (Granite) for enhanced analysis..."
+
+            # Read the analysis context
+            ANALYSIS_CONTEXT=$(cat analysis-context.txt)
+
+            # Create the AI prompt
+            AI_PROMPT="You are an expert OpenShift and DevOps engineer analyzing a failed GitHub Actions workflow.
+
+Context:
+$ANALYSIS_CONTEXT
+
+Please provide a detailed technical analysis including:
+1. Root cause analysis of the failure
+2. Specific troubleshooting steps for OpenShift/Vault/AWS issues
+3. Preventive measures to avoid similar failures
+4. Code or configuration recommendations
+
+Focus on actionable, technical guidance for a Principal Red Hat OpenShift Engineer."
+
+            # Call Granite model via Red Hat AI Services
+            AI_RESPONSE=$(curl -s -X POST \
+              "${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}/v1/chat/completions" \
+              -H "Authorization: Bearer ${{ secrets.REDHAT_AI_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"model\": \"${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}\",
+                \"messages\": [
+                  {
+                    \"role\": \"user\",
+                    \"content\": \"$AI_PROMPT\"
+                  }
+                ],
+                \"max_tokens\": 2000,
+                \"temperature\": 0.1
+              }")
+
+            # Extract the AI response
+            if echo "$AI_RESPONSE" | jq -e '.choices[0].message.content' > /dev/null 2>&1; then
+              AI_ANALYSIS=$(echo "$AI_RESPONSE" | jq -r '.choices[0].message.content')
+              echo "✅ Successfully received AI analysis from Granite model"
+              echo "$AI_ANALYSIS" > ai-enhanced-analysis.txt
+              echo "📝 AI analysis saved to ai-enhanced-analysis.txt"
+            else
+              echo "⚠️ Failed to get valid response from AI service"
+              echo "Response: $AI_RESPONSE"
+              echo "No AI enhancement available" > ai-enhanced-analysis.txt
+            fi
+          else
+            echo "⚠️ AI enhancement requested but REDHAT_AI_API_KEY not configured"
+            echo "No AI enhancement available - API key missing" > ai-enhanced-analysis.txt
+          fi
+
       - name: Generate analysis report
         run: |
           # Create analysis report using simple echo commands
@@ -207,7 +264,16 @@ jobs:
           echo "" >> analysis-report.md
           echo "## Key Findings" >> analysis-report.md
           echo "" >> analysis-report.md
-          
+
+          # Add AI-enhanced analysis if available
+          if [[ "${{ inputs.ai_enhanced }}" == "true" && -f ai-enhanced-analysis.txt ]]; then
+            echo "### 🤖 AI-Enhanced Analysis (Granite Model)" >> analysis-report.md
+            echo "" >> analysis-report.md
+            cat ai-enhanced-analysis.txt >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "" >> analysis-report.md
+          fi
+
           # Add status-specific analysis
           if [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "failure" ]]; then
             echo "### 🚨 Failure Analysis" >> analysis-report.md
@@ -279,6 +345,7 @@ jobs:
             analysis-report.md
             combined-logs.txt
             analysis-context.txt
+            ai-enhanced-analysis.txt
           retention-days: 30
 
       - name: Cleanup
