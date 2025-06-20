@@ -16,6 +16,7 @@ This directory contains Architecture Decision Records for the Vault HA deploymen
 | [008](008-gcp-openshift-integration-strategy.md) | GCP OpenShift Integration Strategy | Proposed | 2025-06-04 |
 | [009](009-github-actions-jwt-authentication-strategy.md) | GitHub Actions JWT Authentication Strategy | Proposed | 2025-06-04 |
 | [010](010-openshift-secrets-vault-integration.md) | OpenShift Secrets Vault Integration Strategy | Accepted | 2025-06-06 |
+| [011](011-aws-networking-compliance-ovn-kubernetes.md) | AWS Networking Compliance for OpenShift 4.18 OVN-Kubernetes | Accepted | 2025-06-20 |
 
 ## ADR Process
 
