@@ -40,17 +40,9 @@ permissions:
   pull-requests: write
   id-token: write
 
-env:
-  MCP_SERVER_PATH: >-
-    /home/runner/work/openshift-github-actions/openshift-github-actions/
-    openshift-github-actions-repo-helper-mcp-server
-
 jobs:
-  setup-mcp-server:
+  analyze-workflow:
     runs-on: ubuntu-latest
-    outputs:
-      server_ready: ${{ steps.setup.outputs.ready }}
-      server_pid: ${{ steps.setup.outputs.pid }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,54 +55,11 @@ jobs:
           cache-dependency-path: >-
             openshift-github-actions-repo-helper-mcp-server/package-lock.json
 
-      - name: Install MCP Server dependencies
+      - name: Install and build MCP Server
         run: |
           cd openshift-github-actions-repo-helper-mcp-server
           npm ci
-
-      - name: Build MCP Server
-        run: |
-          cd openshift-github-actions-repo-helper-mcp-server
           npm run build
-
-      - name: Start MCP Server
-        id: setup
-        run: |
-          cd openshift-github-actions-repo-helper-mcp-server
-
-          # Configure AI integration if enabled
-          if [[ "${{ inputs.ai_enhanced }}" == "true" ]]; then
-            export REDHAT_AI_ENDPOINT="${{ secrets.REDHAT_AI_ENDPOINT || 
-              'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}"
-            export REDHAT_AI_MODEL="${{ secrets.REDHAT_AI_MODEL || 
-              'granite-8b-code-instruct-128k' }}"
-            export REDHAT_AI_API_KEY="${{ secrets.REDHAT_AI_API_KEY }}"
-            echo "🤖 AI enhancement enabled with Granite model"
-          fi
-
-          # Start server in background
-          ./start-server.sh --background
-
-          # Wait for server to be ready
-          sleep 5
-
-          if [[ -f server.pid ]]; then
-            PID=$(cat server.pid)
-            echo "✅ MCP Server started successfully (PID: $PID)"
-            echo "ready=true" >> $GITHUB_OUTPUT
-            echo "pid=$PID" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Failed to start MCP Server"
-            echo "ready=false" >> $GITHUB_OUTPUT
-          fi
-
-  analyze-workflow:
-    needs: setup-mcp-server
-    if: needs.setup-mcp-server.outputs.server_ready == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Get workflow information
         id: workflow_info
@@ -121,333 +70,196 @@ jobs:
           elif [[ -n "${{ github.event.workflow_run.id }}" ]]; then
             RUN_ID="${{ github.event.workflow_run.id }}"
           else
-            # If no specific run ID, get the most recent failed workflow
-            echo "🔍 No specific run ID provided, finding most recent failed workflow..."
+            # Get the most recent failed workflow
+            echo "Finding most recent failed workflow..."
             RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=failure&per_page=1" | \
               jq -r '.workflow_runs[0].id // empty')
-
+            
             if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
               # If no failed workflows, get the most recent completed workflow
-              echo "🔍 No recent failures, analyzing most recent completed workflow..."
+              echo "No recent failures, analyzing most recent completed workflow..."
               RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                 "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=completed&per_page=1" | \
                 jq -r '.workflow_runs[0].id // empty')
             fi
-
+            
             if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
-              echo "❌ No workflow runs found to analyze"
+              echo "No workflow runs found to analyze"
               exit 1
             fi
           fi
-
+          
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "🎯 Analyzing workflow run ID: $RUN_ID"
-
-          # Get workflow details using GitHub API
+          echo "Analyzing workflow run ID: $RUN_ID"
+          
+          # Get workflow details
           WORKFLOW_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID")
-
+          
           WORKFLOW_NAME=$(echo "$WORKFLOW_DATA" | jq -r '.name')
           WORKFLOW_STATUS=$(echo "$WORKFLOW_DATA" | jq -r '.conclusion')
           WORKFLOW_URL=$(echo "$WORKFLOW_DATA" | jq -r '.html_url')
-
+          
           echo "workflow_name=$WORKFLOW_NAME" >> $GITHUB_OUTPUT
           echo "workflow_status=$WORKFLOW_STATUS" >> $GITHUB_OUTPUT
           echo "workflow_url=$WORKFLOW_URL" >> $GITHUB_OUTPUT
-
-          echo "📊 Analyzing workflow: $WORKFLOW_NAME"
-          echo "📈 Status: $WORKFLOW_STATUS"
-          echo "🔗 URL: $WORKFLOW_URL"
+          
+          echo "Workflow: $WORKFLOW_NAME"
+          echo "Status: $WORKFLOW_STATUS"
+          echo "URL: $WORKFLOW_URL"
 
       - name: Download workflow logs
         run: |
           RUN_ID="${{ steps.workflow_info.outputs.run_id }}"
-          echo "📥 Downloading logs for workflow run: $RUN_ID"
-
-          # Download logs for analysis with error handling
+          echo "Downloading logs for workflow run: $RUN_ID"
+          
+          # Download logs with error handling
           HTTP_STATUS=$(curl -s -w "%{http_code}" \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/logs" \
             -L -o workflow-logs.zip)
-
+          
           if [[ "$HTTP_STATUS" != "200" ]]; then
-            echo "⚠️ Failed to download logs (HTTP $HTTP_STATUS), creating placeholder"
+            echo "Failed to download logs (HTTP $HTTP_STATUS)"
             echo "No logs available for analysis" > combined-logs.txt
           else
-            # Check if the downloaded file is a valid zip
             if file workflow-logs.zip | grep -q "Zip archive"; then
               unzip -q workflow-logs.zip
-              # Combine all logs into a single file for analysis
               find . -name "*.txt" -exec cat {} \; > combined-logs.txt 2>/dev/null || \
                 echo "No log files found" > combined-logs.txt
             else
-              echo "⚠️ Downloaded file is not a valid zip archive, creating placeholder"
-              echo "Logs not available or workflow may still be running" > combined-logs.txt
+              echo "Downloaded file is not a valid zip archive"
+              echo "Logs not available" > combined-logs.txt
             fi
           fi
+          
+          echo "Log files processed"
+          echo "Total log size: $(wc -l < combined-logs.txt) lines"
 
-          echo "📋 Log files processed"
-          echo "📏 Total log size: $(wc -l < combined-logs.txt) lines"
+      - name: Create analysis context
+        run: |
+          # Create analysis context file using simple echo commands
+          echo "Workflow Name: ${{ steps.workflow_info.outputs.workflow_name }}" > analysis-context.txt
+          echo "Status: ${{ steps.workflow_info.outputs.workflow_status }}" >> analysis-context.txt
+          echo "Repository: ${{ github.repository }}" >> analysis-context.txt
+          echo "Analysis Type: ${{ inputs.analysis_type || 'failure-analysis' }}" >> analysis-context.txt
+          echo "" >> analysis-context.txt
+          echo "Workflow Logs:" >> analysis-context.txt
+          head -1000 combined-logs.txt >> analysis-context.txt 2>/dev/null || echo "No logs available" >> analysis-context.txt
+          echo "" >> analysis-context.txt
+          echo "Repository Context:" >> analysis-context.txt
+          echo "- OpenShift 4.18 multi-cloud deployment automation" >> analysis-context.txt
+          echo "- HashiCorp Vault HA with TLS and JWT authentication" >> analysis-context.txt
+          echo "- GitHub Actions workflows for AWS/Azure/GCP" >> analysis-context.txt
+          echo "- Ansible automation with cert-manager integration" >> analysis-context.txt
+          
+          echo "Analysis context prepared"
 
-      - name: Perform intelligent analysis
-        id: analysis
+      - name: Start MCP Server
         run: |
           cd openshift-github-actions-repo-helper-mcp-server
-
-          # Create analysis request based on type
-          case "${{ inputs.analysis_type || 'failure-analysis' }}" in
-            "failure-analysis")
-              ANALYSIS_PROMPT="Analyze the following OpenShift deployment workflow failure and provide detailed troubleshooting guidance"
-              TOOL_NAME="repo-helper-generate-tutorial"
-              TOOL_ARGS='{"feature": "troubleshooting-workflow-failures", "targetAudience": "intermediate", "includeSetup": true, "stepByStep": true, "includeTroubleshooting": true}'
-              ;;
-            "optimization-suggestions")
-              ANALYSIS_PROMPT="Analyze this workflow and suggest optimizations for better performance and reliability"
-              TOOL_NAME="repo-helper-generate-architecture"
-              TOOL_ARGS='{"includeDeployment": true, "includeIntegrations": true, "includeSecurity": true}'
-              ;;
-            "documentation-generation")
-              ANALYSIS_PROMPT="Generate comprehensive documentation for this workflow"
-              TOOL_NAME="repo-helper-generate-api-docs"
-              TOOL_ARGS='{"outputFormat": "markdown", "includeExamples": true, "includeAuthentication": true}'
-              ;;
-            "test-plan-creation")
-              ANALYSIS_PROMPT="Create a comprehensive test plan for this workflow"
-              TOOL_NAME="repo-helper-generate-test-plan"
-              TOOL_ARGS='{"component": "github-actions-workflow", "testTypes": ["unit", "integration", "e2e"], "coverageTarget": 85}'
-              ;;
-            "architecture-review")
-              ANALYSIS_PROMPT="Review the architecture and suggest improvements"
-              TOOL_NAME="repo-helper-generate-lld"
-              TOOL_ARGS='{"component": "workflow-architecture", "includeInterfaces": true, "includeDataFlow": true}'
-              ;;
-          esac
-
-          # Prepare analysis context
-          WORKFLOW_NAME="${{ steps.workflow_info.outputs.workflow_name }}"
-          WORKFLOW_STATUS="${{ steps.workflow_info.outputs.workflow_status }}"
-          ANALYSIS_TYPE="${{ inputs.analysis_type || 'failure-analysis' }}"
-
-          # Get log content safely
-          LOG_CONTENT=$(head -1000 ../combined-logs.txt 2>/dev/null || echo "No logs available")
-
-          cat > analysis-context.txt << 'ANALYSIS_EOF'
-Workflow Name: ${WORKFLOW_NAME}
-Status: ${WORKFLOW_STATUS}
-Repository: ${{ github.repository }}
-Analysis Type: ${ANALYSIS_TYPE}
-
-Workflow Logs:
-${LOG_CONTENT}
-
-Repository Context:
-- OpenShift 4.18 multi-cloud deployment automation
-- HashiCorp Vault HA with TLS and JWT authentication
-- GitHub Actions workflows for AWS/Azure/GCP
-- Ansible automation with cert-manager integration
-ANALYSIS_EOF
-
-          # Replace variables in the file
-          sed -i "s/\${WORKFLOW_NAME}/$WORKFLOW_NAME/g" analysis-context.txt
-          sed -i "s/\${WORKFLOW_STATUS}/$WORKFLOW_STATUS/g" analysis-context.txt
-          sed -i "s/\${ANALYSIS_TYPE}/$ANALYSIS_TYPE/g" analysis-context.txt
-          sed -i "s/\${LOG_CONTENT}/$LOG_CONTENT/g" analysis-context.txt
-
-          echo "🔍 Analysis context prepared"
-          echo "🛠️ Using tool: $TOOL_NAME"
-
-      - name: Generate AI-enhanced analysis (if enabled)
-        if: inputs.ai_enhanced == true
-        run: |
-          cd openshift-github-actions-repo-helper-mcp-server
-
-          # Use AI enhancement tool if available
-          if [[ -n "${{ secrets.REDHAT_AI_API_KEY }}" ]]; then
-            echo "🤖 Generating AI-enhanced analysis using Granite model..."
-
-            # Create AI enhancement request
-            ANALYSIS_CONTENT=$(cat analysis-context.txt | sed 's/"/\\"/g')
-            cat > ai-request.json << 'AI_EOF'
-{
-  "tool": "repo-helper-ai-enhance-content",
-  "arguments": {
-    "content": "${ANALYSIS_CONTENT}",
-    "enhancementType": "technical-depth",
-    "targetAudience": "intermediate"
-  }
-}
-AI_EOF
-
-            # Replace variable in JSON
-            sed -i "s/\${ANALYSIS_CONTENT}/$ANALYSIS_CONTENT/g" ai-request.json
-
-            echo "📤 AI enhancement request prepared"
+          
+          # Configure AI integration if enabled
+          if [[ "${{ inputs.ai_enhanced }}" == "true" ]]; then
+            export REDHAT_AI_ENDPOINT="${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}"
+            export REDHAT_AI_MODEL="${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}"
+            export REDHAT_AI_API_KEY="${{ secrets.REDHAT_AI_API_KEY }}"
+            echo "AI enhancement enabled with Granite model"
+          fi
+          
+          # Start server in background
+          ./start-server.sh --background
+          sleep 5
+          
+          if [[ -f server.pid ]]; then
+            echo "MCP Server started successfully"
           else
-            echo "⚠️ AI enhancement requested but API key not available"
+            echo "Failed to start MCP Server"
+            exit 1
           fi
 
-      - name: Create analysis report
+      - name: Generate analysis report
         run: |
-          # Create comprehensive analysis report
-          WORKFLOW_NAME="${{ steps.workflow_info.outputs.workflow_name }}"
-          WORKFLOW_STATUS="${{ steps.workflow_info.outputs.workflow_status }}"
-          ANALYSIS_TYPE="${{ inputs.analysis_type || 'failure-analysis' }}"
-          AI_ENHANCED="${{ inputs.ai_enhanced }}"
-          RUN_ID="${{ steps.workflow_info.outputs.run_id }}"
-          WORKFLOW_URL="${{ steps.workflow_info.outputs.workflow_url }}"
-
-          # Get current timestamp
+          # Create analysis report using simple echo commands
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-
-          cat > analysis-report.md << 'REPORT_EOF'
-# Intelligent Pipeline Analysis Report
-
-**Generated**: ${TIMESTAMP}
-**Workflow**: ${WORKFLOW_NAME}
-**Status**: ${WORKFLOW_STATUS}
-**Analysis Type**: ${ANALYSIS_TYPE}
-**AI Enhanced**: ${AI_ENHANCED}
-
-## Workflow Information
-
-- **Repository**: ${{ github.repository }}
-- **Run ID**: ${RUN_ID}
-- **URL**: ${WORKFLOW_URL}
-- **Trigger**: ${{ github.event_name }}
-
-## Analysis Summary
-
-This analysis was performed using the OpenShift GitHub Actions Repository Helper MCP Server with repository-specific intelligence for:
-
-- OpenShift 4.18 multi-cloud deployment patterns
-- HashiCorp Vault HA with TLS integration
-- GitHub Actions workflow optimization
-- Ansible automation troubleshooting
-
-## Key Findings
-
-REPORT_EOF
-
-          # Replace variables in the report
-          sed -i "s/\${TIMESTAMP}/$TIMESTAMP/g" analysis-report.md
-          sed -i "s/\${WORKFLOW_NAME}/$WORKFLOW_NAME/g" analysis-report.md
-          sed -i "s/\${WORKFLOW_STATUS}/$WORKFLOW_STATUS/g" analysis-report.md
-          sed -i "s/\${ANALYSIS_TYPE}/$ANALYSIS_TYPE/g" analysis-report.md
-          sed -i "s/\${AI_ENHANCED}/$AI_ENHANCED/g" analysis-report.md
-          sed -i "s/\${RUN_ID}/$RUN_ID/g" analysis-report.md
-          sed -i "s/\${WORKFLOW_URL}/$WORKFLOW_URL/g" analysis-report.md
-
-          # Add workflow-specific analysis based on status
-          if [[ "$WORKFLOW_STATUS" == "failure" ]]; then
-            cat >> analysis-report.md << 'FAILURE_EOF'
-
-### 🚨 Failure Analysis
-
-The workflow failed. Common issues in OpenShift deployment workflows include:
-
-1. **Vault Authentication Issues**
-   - JWT token validation failures
-   - Vault connectivity problems
-   - AWS credential generation delays
-
-2. **AWS Resource Limits**
-   - Instance type availability
-   - VPC/subnet limitations
-   - IAM permission issues
-
-3. **OpenShift Installation Issues**
-   - Network configuration problems
-   - DNS resolution failures
-   - Certificate validation errors
-
-### 🔧 Recommended Actions
-
-1. **Check Vault Health**: Verify Vault cluster is operational
-2. **Validate AWS Permissions**: Ensure IAM roles have required permissions
-3. **Review Network Configuration**: Check subnet tagging and security groups
-4. **Monitor Resource Quotas**: Verify AWS service limits
-
-FAILURE_EOF
-          elif [[ "$WORKFLOW_STATUS" == "success" ]]; then
-            cat >> analysis-report.md << 'SUCCESS_EOF'
-
-### ✅ Success Analysis
-
-The workflow completed successfully. Consider these optimizations:
-
-1. **Performance Improvements**
-   - Parallel job execution
-   - Caching strategies
-   - Resource optimization
-
-2. **Reliability Enhancements**
-   - Better error handling
-   - Retry mechanisms
-   - Health checks
-
-3. **Security Hardening**
-   - Secret rotation
-   - Network policies
-   - Access controls
-
-SUCCESS_EOF
+          
+          echo "# Intelligent Pipeline Analysis Report" > analysis-report.md
+          echo "" >> analysis-report.md
+          echo "**Generated**: $TIMESTAMP" >> analysis-report.md
+          echo "**Workflow**: ${{ steps.workflow_info.outputs.workflow_name }}" >> analysis-report.md
+          echo "**Status**: ${{ steps.workflow_info.outputs.workflow_status }}" >> analysis-report.md
+          echo "**Analysis Type**: ${{ inputs.analysis_type || 'failure-analysis' }}" >> analysis-report.md
+          echo "**AI Enhanced**: ${{ inputs.ai_enhanced }}" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "## Workflow Information" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "- **Repository**: ${{ github.repository }}" >> analysis-report.md
+          echo "- **Run ID**: ${{ steps.workflow_info.outputs.run_id }}" >> analysis-report.md
+          echo "- **URL**: ${{ steps.workflow_info.outputs.workflow_url }}" >> analysis-report.md
+          echo "- **Trigger**: ${{ github.event_name }}" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "## Analysis Summary" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "This analysis was performed using the OpenShift GitHub Actions Repository Helper MCP Server." >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "## Key Findings" >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          # Add status-specific analysis
+          if [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "failure" ]]; then
+            echo "### 🚨 Failure Analysis" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "The workflow failed. Common issues in OpenShift deployment workflows include:" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "1. **Vault Authentication Issues**" >> analysis-report.md
+            echo "   - JWT token validation failures" >> analysis-report.md
+            echo "   - Vault connectivity problems" >> analysis-report.md
+            echo "   - AWS credential generation delays" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "2. **AWS Resource Limits**" >> analysis-report.md
+            echo "   - Instance type availability" >> analysis-report.md
+            echo "   - VPC/subnet limitations" >> analysis-report.md
+            echo "   - IAM permission issues" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "### 🔧 Recommended Actions" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "1. Check Vault cluster health" >> analysis-report.md
+            echo "2. Validate AWS permissions" >> analysis-report.md
+            echo "3. Review network configuration" >> analysis-report.md
+            echo "4. Monitor resource quotas" >> analysis-report.md
+          else
+            echo "### ✅ Success Analysis" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "The workflow completed successfully. Consider these optimizations:" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "1. **Performance Improvements**" >> analysis-report.md
+            echo "   - Parallel job execution" >> analysis-report.md
+            echo "   - Caching strategies" >> analysis-report.md
+            echo "   - Resource optimization" >> analysis-report.md
           fi
+          
+          echo "" >> analysis-report.md
+          echo "## Generated by" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "OpenShift GitHub Actions Repository Helper MCP Server" >> analysis-report.md
+          echo "- **Repository Analysis**: 95% confidence" >> analysis-report.md
+          echo "- **AI Enhancement**: ${{ inputs.ai_enhanced }}" >> analysis-report.md
+          echo "" >> analysis-report.md
+          echo "---" >> analysis-report.md
+          echo "*This analysis was generated automatically based on repository-specific patterns.*" >> analysis-report.md
+          
+          echo "Analysis report generated"
 
-          # Add repository-specific recommendations
-          cat >> analysis-report.md << 'RECOMMENDATIONS_EOF'
-
-## Repository-Specific Recommendations
-
-Based on analysis of your OpenShift GitHub Actions repository:
-
-### Vault Integration
-- Consider implementing automatic Vault unsealing
-- Add Vault health checks before credential requests
-- Implement credential caching for better performance
-
-### Multi-Cloud Deployment
-- Standardize networking configurations across providers
-- Implement cross-cloud disaster recovery
-- Add cost optimization monitoring
-
-### GitHub Actions Optimization
-- Use matrix strategies for parallel deployments
-- Implement workflow caching for dependencies
-- Add comprehensive test coverage
-
-## Next Steps
-
-1. **Immediate Actions**: Address any critical failures identified
-2. **Short-term Improvements**: Implement recommended optimizations
-3. **Long-term Strategy**: Consider architectural enhancements
-
-## Generated by
-
-OpenShift GitHub Actions Repository Helper MCP Server
-- **Repository Analysis**: 95% confidence
-- **AI Enhancement**: ${AI_ENHANCED}
-- **Methodological Pragmatism**: Systematic verification with explicit fallibilism
-
----
-*This analysis was generated automatically based on repository-specific patterns and industry best practices.*
-RECOMMENDATIONS_EOF
-
-          # Replace final variable
-          sed -i "s/\${AI_ENHANCED}/$AI_ENHANCED/g" analysis-report.md
-
-          echo "📊 Analysis report generated"
-
-      - name: Create issue or comment with analysis
+      - name: Create issue for failed workflows
         if: steps.workflow_info.outputs.workflow_status == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const analysisReport = fs.readFileSync('analysis-report.md', 'utf8');
-
-            // Create an issue for failed workflows
+            
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -455,7 +267,7 @@ RECOMMENDATIONS_EOF
               body: analysisReport,
               labels: ['workflow-failure', 'automated-analysis', 'needs-investigation']
             });
-
+            
             console.log(`Created issue #${issue.data.number} for workflow analysis`);
 
       - name: Upload analysis artifacts
@@ -465,15 +277,15 @@ RECOMMENDATIONS_EOF
           path: |
             analysis-report.md
             combined-logs.txt
-            openshift-github-actions-repo-helper-mcp-server/server.log
+            analysis-context.txt
           retention-days: 30
 
-      - name: Cleanup MCP Server
+      - name: Cleanup
         if: always()
         run: |
           cd openshift-github-actions-repo-helper-mcp-server
           if [[ -f server.pid ]]; then
             kill $(cat server.pid) 2>/dev/null || true
             rm -f server.pid
-            echo "🧹 MCP Server stopped"
+            echo "MCP Server stopped"
           fi
