@@ -218,21 +218,25 @@ jobs:
           esac
           
           # Prepare analysis context
+          WORKFLOW_NAME="${{ steps.workflow_info.outputs.workflow_name }}"
+          WORKFLOW_STATUS="${{ steps.workflow_info.outputs.workflow_status }}"
+          ANALYSIS_TYPE="${{ inputs.analysis_type || 'failure-analysis' }}"
+
           cat > analysis-context.txt << EOF
-          Workflow Name: ${{ steps.workflow_info.outputs.workflow_name }}
-          Status: ${{ steps.workflow_info.outputs.workflow_status }}
-          Repository: ${{ github.repository }}
-          Analysis Type: ${{ inputs.analysis_type || 'failure-analysis' }}
-          
-          Workflow Logs:
-          $(head -1000 ../combined-logs.txt)
-          
-          Repository Context:
-          - OpenShift 4.18 multi-cloud deployment automation
-          - HashiCorp Vault HA with TLS and JWT authentication
-          - GitHub Actions workflows for AWS/Azure/GCP
-          - Ansible automation with cert-manager integration
-          EOF
+Workflow Name: $WORKFLOW_NAME
+Status: $WORKFLOW_STATUS
+Repository: ${{ github.repository }}
+Analysis Type: $ANALYSIS_TYPE
+
+Workflow Logs:
+$(head -1000 ../combined-logs.txt 2>/dev/null || echo "No logs available")
+
+Repository Context:
+- OpenShift 4.18 multi-cloud deployment automation
+- HashiCorp Vault HA with TLS and JWT authentication
+- GitHub Actions workflows for AWS/Azure/GCP
+- Ansible automation with cert-manager integration
+EOF
           
           echo "🔍 Analysis context prepared"
           echo "🛠️ Using tool: $TOOL_NAME"
@@ -247,16 +251,17 @@ jobs:
             echo "🤖 Generating AI-enhanced analysis using Granite model..."
             
             # Create AI enhancement request
+            ANALYSIS_CONTENT=$(cat analysis-context.txt | sed 's/"/\\"/g')
             cat > ai-request.json << EOF
-            {
-              "tool": "repo-helper-ai-enhance-content",
-              "arguments": {
-                "content": "$(cat analysis-context.txt)",
-                "enhancementType": "technical-depth",
-                "targetAudience": "intermediate"
-              }
-            }
-            EOF
+{
+  "tool": "repo-helper-ai-enhance-content",
+  "arguments": {
+    "content": "$ANALYSIS_CONTENT",
+    "enhancementType": "technical-depth",
+    "targetAudience": "intermediate"
+  }
+}
+EOF
             
             echo "📤 AI enhancement request prepared"
           else
@@ -266,39 +271,46 @@ jobs:
       - name: Create analysis report
         run: |
           # Create comprehensive analysis report
+          WORKFLOW_NAME="${{ steps.workflow_info.outputs.workflow_name }}"
+          WORKFLOW_STATUS="${{ steps.workflow_info.outputs.workflow_status }}"
+          ANALYSIS_TYPE="${{ inputs.analysis_type || 'failure-analysis' }}"
+          AI_ENHANCED="${{ inputs.ai_enhanced }}"
+          RUN_ID="${{ steps.workflow_info.outputs.run_id }}"
+          WORKFLOW_URL="${{ steps.workflow_info.outputs.workflow_url }}"
+
           cat > analysis-report.md << EOF
-          # Intelligent Pipeline Analysis Report
-          
-          **Generated**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          **Workflow**: ${{ steps.workflow_info.outputs.workflow_name }}
-          **Status**: ${{ steps.workflow_info.outputs.workflow_status }}
-          **Analysis Type**: ${{ inputs.analysis_type || 'failure-analysis' }}
-          **AI Enhanced**: ${{ inputs.ai_enhanced }}
-          
-          ## Workflow Information
-          
-          - **Repository**: ${{ github.repository }}
-          - **Run ID**: ${{ steps.workflow_info.outputs.run_id }}
-          - **URL**: ${{ steps.workflow_info.outputs.workflow_url }}
-          - **Trigger**: ${{ github.event_name }}
-          
-          ## Analysis Summary
-          
-          This analysis was performed using the OpenShift GitHub Actions Repository Helper MCP Server with repository-specific intelligence for:
-          
-          - OpenShift 4.18 multi-cloud deployment patterns
-          - HashiCorp Vault HA with TLS integration
-          - GitHub Actions workflow optimization
-          - Ansible automation troubleshooting
-          
-          ## Key Findings
-          
-          EOF
+# Intelligent Pipeline Analysis Report
+
+**Generated**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Workflow**: $WORKFLOW_NAME
+**Status**: $WORKFLOW_STATUS
+**Analysis Type**: $ANALYSIS_TYPE
+**AI Enhanced**: $AI_ENHANCED
+
+## Workflow Information
+
+- **Repository**: ${{ github.repository }}
+- **Run ID**: $RUN_ID
+- **URL**: $WORKFLOW_URL
+- **Trigger**: ${{ github.event_name }}
+
+## Analysis Summary
+
+This analysis was performed using the OpenShift GitHub Actions Repository Helper MCP Server with repository-specific intelligence for:
+
+- OpenShift 4.18 multi-cloud deployment patterns
+- HashiCorp Vault HA with TLS integration
+- GitHub Actions workflow optimization
+- Ansible automation troubleshooting
+
+## Key Findings
+
+EOF
           
           # Add workflow-specific analysis based on status
-          if [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "failure" ]]; then
+          if [[ "$WORKFLOW_STATUS" == "failure" ]]; then
             cat >> analysis-report.md << EOF
-          ### 🚨 Failure Analysis
+### 🚨 Failure Analysis
           
           The workflow failed. Common issues in OpenShift deployment workflows include:
           
@@ -319,15 +331,15 @@ jobs:
           
           ### 🔧 Recommended Actions
           
-          1. **Check Vault Health**: Verify Vault cluster is operational
-          2. **Validate AWS Permissions**: Ensure IAM roles have required permissions
-          3. **Review Network Configuration**: Check subnet tagging and security groups
-          4. **Monitor Resource Quotas**: Verify AWS service limits
-          
-          EOF
-          elif [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "success" ]]; then
+1. **Check Vault Health**: Verify Vault cluster is operational
+2. **Validate AWS Permissions**: Ensure IAM roles have required permissions
+3. **Review Network Configuration**: Check subnet tagging and security groups
+4. **Monitor Resource Quotas**: Verify AWS service limits
+
+EOF
+          elif [[ "$WORKFLOW_STATUS" == "success" ]]; then
             cat >> analysis-report.md << EOF
-          ### ✅ Success Analysis
+### ✅ Success Analysis
           
           The workflow completed successfully. Consider these optimizations:
           
@@ -341,51 +353,51 @@ jobs:
              - Retry mechanisms
              - Health checks
           
-          3. **Security Hardening**
-             - Secret rotation
-             - Network policies
-             - Access controls
-          
-          EOF
+3. **Security Hardening**
+   - Secret rotation
+   - Network policies
+   - Access controls
+
+EOF
           fi
-          
+
           # Add repository-specific recommendations
           cat >> analysis-report.md << EOF
-          ## Repository-Specific Recommendations
-          
-          Based on analysis of your OpenShift GitHub Actions repository:
-          
-          ### Vault Integration
-          - Consider implementing automatic Vault unsealing
-          - Add Vault health checks before credential requests
-          - Implement credential caching for better performance
-          
-          ### Multi-Cloud Deployment
-          - Standardize networking configurations across providers
-          - Implement cross-cloud disaster recovery
-          - Add cost optimization monitoring
-          
-          ### GitHub Actions Optimization
-          - Use matrix strategies for parallel deployments
-          - Implement workflow caching for dependencies
-          - Add comprehensive test coverage
-          
-          ## Next Steps
-          
-          1. **Immediate Actions**: Address any critical failures identified
-          2. **Short-term Improvements**: Implement recommended optimizations
-          3. **Long-term Strategy**: Consider architectural enhancements
-          
-          ## Generated by
-          
-          OpenShift GitHub Actions Repository Helper MCP Server
-          - **Repository Analysis**: 95% confidence
-          - **AI Enhancement**: ${{ inputs.ai_enhanced && 'Enabled (Granite model)' || 'Disabled' }}
-          - **Methodological Pragmatism**: Systematic verification with explicit fallibilism
-          
-          ---
-          *This analysis was generated automatically based on repository-specific patterns and industry best practices.*
-          EOF
+## Repository-Specific Recommendations
+
+Based on analysis of your OpenShift GitHub Actions repository:
+
+### Vault Integration
+- Consider implementing automatic Vault unsealing
+- Add Vault health checks before credential requests
+- Implement credential caching for better performance
+
+### Multi-Cloud Deployment
+- Standardize networking configurations across providers
+- Implement cross-cloud disaster recovery
+- Add cost optimization monitoring
+
+### GitHub Actions Optimization
+- Use matrix strategies for parallel deployments
+- Implement workflow caching for dependencies
+- Add comprehensive test coverage
+
+## Next Steps
+
+1. **Immediate Actions**: Address any critical failures identified
+2. **Short-term Improvements**: Implement recommended optimizations
+3. **Long-term Strategy**: Consider architectural enhancements
+
+## Generated by
+
+OpenShift GitHub Actions Repository Helper MCP Server
+- **Repository Analysis**: 95% confidence
+- **AI Enhancement**: $AI_ENHANCED
+- **Methodological Pragmatism**: Systematic verification with explicit fallibilism
+
+---
+*This analysis was generated automatically based on repository-specific patterns and industry best practices.*
+EOF
           
           echo "📊 Analysis report generated"
 
