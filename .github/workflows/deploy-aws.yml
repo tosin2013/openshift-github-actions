@@ -215,7 +215,9 @@ jobs:
             exit 1
           fi
           
-          echo "PULL_SECRET=$(echo "$PULL_SECRET_DATA" | jq -r '.data.data.pullSecret')" >> $GITHUB_ENV
+          echo "PULL_SECRET<<EOF" >> $GITHUB_ENV
+          echo "$PULL_SECRET_DATA" | jq -r '.data.data.pullSecret' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           
           # Get SSH keys
           echo "Getting SSH keys..."
@@ -227,8 +229,13 @@ jobs:
             exit 1
           fi
           
-          echo "SSH_PRIVATE_KEY=$(echo "$SSH_KEY_DATA" | jq -r '.data.data.private_key')" >> $GITHUB_ENV
-          echo "SSH_PUBLIC_KEY=$(echo "$SSH_KEY_DATA" | jq -r '.data.data.public_key')" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+          echo "$SSH_KEY_DATA" | jq -r '.data.data.private_key' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          echo "SSH_PUBLIC_KEY<<EOF" >> $GITHUB_ENV
+          echo "$SSH_KEY_DATA" | jq -r '.data.data.public_key' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           
           # Get base domain
           echo "Getting base domain..."
