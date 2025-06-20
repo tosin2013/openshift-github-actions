@@ -1,0 +1,17 @@
+---
+name: Test Trigger Intelligent Assistant
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulate failure for testing
+        run: |
+          echo "This is a test workflow that will fail to trigger the intelligent assistant"
+          echo "Simulating a typical OpenShift deployment failure..."
+          echo "Error: Failed to authenticate to Vault"
+          echo "Error: Command failed with exit code 127"
+          exit 1
