@@ -10,6 +10,7 @@ on:
       - "Deploy OpenShift Multi-Cloud"
       - "Vault JWT vs OC Exec Comparison Test"
       - "Destroy Cluster"
+      - "Test Trigger Intelligent Assistant"
     types: [completed]
   workflow_dispatch:
     inputs:
