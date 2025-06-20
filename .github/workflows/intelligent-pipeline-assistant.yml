@@ -222,6 +222,9 @@ jobs:
           WORKFLOW_STATUS="${{ steps.workflow_info.outputs.workflow_status }}"
           ANALYSIS_TYPE="${{ inputs.analysis_type || 'failure-analysis' }}"
 
+          # Get log content safely
+          LOG_CONTENT=$(head -1000 ../combined-logs.txt 2>/dev/null || echo "No logs available")
+
           cat > analysis-context.txt << EOF
 Workflow Name: $WORKFLOW_NAME
 Status: $WORKFLOW_STATUS
@@ -229,7 +232,7 @@ Repository: ${{ github.repository }}
 Analysis Type: $ANALYSIS_TYPE
 
 Workflow Logs:
-$(head -1000 ../combined-logs.txt 2>/dev/null || echo "No logs available")
+$LOG_CONTENT
 
 Repository Context:
 - OpenShift 4.18 multi-cloud deployment automation
@@ -278,10 +281,13 @@ EOF
           RUN_ID="${{ steps.workflow_info.outputs.run_id }}"
           WORKFLOW_URL="${{ steps.workflow_info.outputs.workflow_url }}"
 
+          # Get current timestamp
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
           cat > analysis-report.md << EOF
 # Intelligent Pipeline Analysis Report
 
-**Generated**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Generated**: $TIMESTAMP
 **Workflow**: $WORKFLOW_NAME
 **Status**: $WORKFLOW_STATUS
 **Analysis Type**: $ANALYSIS_TYPE
