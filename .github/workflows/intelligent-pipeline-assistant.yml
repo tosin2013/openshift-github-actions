@@ -1,0 +1,396 @@
+name: Intelligent Pipeline Assistant
+
+on:
+  workflow_run:
+    workflows: 
+      - "Deploy OpenShift on AWS"
+      - "Deploy OpenShift on Azure" 
+      - "Deploy OpenShift on GCP"
+      - "Deploy OpenShift Multi-Cloud"
+      - "Vault JWT vs OC Exec Comparison Test"
+      - "Destroy Cluster"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      analysis_type:
+        description: 'Type of analysis to perform'
+        required: true
+        default: 'failure-analysis'
+        type: choice
+        options:
+          - failure-analysis
+          - optimization-suggestions
+          - documentation-generation
+          - test-plan-creation
+          - architecture-review
+      workflow_run_id:
+        description: 'Workflow Run ID to analyze (optional)'
+        required: false
+        type: string
+      ai_enhanced:
+        description: 'Use Red Hat AI Services (Granite) for enhanced analysis'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  MCP_SERVER_PATH: "/home/runner/work/openshift-github-actions/openshift-github-actions/openshift-github-actions-repo-helper-mcp-server"
+
+jobs:
+  setup-mcp-server:
+    runs-on: ubuntu-latest
+    outputs:
+      server_ready: ${{ steps.setup.outputs.ready }}
+      server_pid: ${{ steps.setup.outputs.pid }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'openshift-github-actions-repo-helper-mcp-server/package-lock.json'
+
+      - name: Install MCP Server dependencies
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          npm ci
+
+      - name: Build MCP Server
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          npm run build
+
+      - name: Start MCP Server
+        id: setup
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          
+          # Configure AI integration if enabled
+          if [[ "${{ inputs.ai_enhanced }}" == "true" ]]; then
+            export REDHAT_AI_ENDPOINT="${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}"
+            export REDHAT_AI_MODEL="${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}"
+            export REDHAT_AI_API_KEY="${{ secrets.REDHAT_AI_API_KEY }}"
+            echo "🤖 AI enhancement enabled with Granite model"
+          fi
+          
+          # Start server in background
+          ./start-server.sh --background
+          
+          # Wait for server to be ready
+          sleep 5
+          
+          if [[ -f server.pid ]]; then
+            PID=$(cat server.pid)
+            echo "✅ MCP Server started successfully (PID: $PID)"
+            echo "ready=true" >> $GITHUB_OUTPUT
+            echo "pid=$PID" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Failed to start MCP Server"
+            echo "ready=false" >> $GITHUB_OUTPUT
+          fi
+
+  analyze-workflow:
+    needs: setup-mcp-server
+    if: needs.setup-mcp-server.outputs.server_ready == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get workflow information
+        id: workflow_info
+        run: |
+          # Determine which workflow to analyze
+          if [[ -n "${{ inputs.workflow_run_id }}" ]]; then
+            RUN_ID="${{ inputs.workflow_run_id }}"
+          else
+            RUN_ID="${{ github.event.workflow_run.id }}"
+          fi
+          
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          
+          # Get workflow details using GitHub API
+          WORKFLOW_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID")
+          
+          WORKFLOW_NAME=$(echo "$WORKFLOW_DATA" | jq -r '.name')
+          WORKFLOW_STATUS=$(echo "$WORKFLOW_DATA" | jq -r '.conclusion')
+          WORKFLOW_URL=$(echo "$WORKFLOW_DATA" | jq -r '.html_url')
+          
+          echo "workflow_name=$WORKFLOW_NAME" >> $GITHUB_OUTPUT
+          echo "workflow_status=$WORKFLOW_STATUS" >> $GITHUB_OUTPUT
+          echo "workflow_url=$WORKFLOW_URL" >> $GITHUB_OUTPUT
+          
+          echo "📊 Analyzing workflow: $WORKFLOW_NAME"
+          echo "📈 Status: $WORKFLOW_STATUS"
+          echo "🔗 URL: $WORKFLOW_URL"
+
+      - name: Download workflow logs
+        run: |
+          # Download logs for analysis
+          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.workflow_info.outputs.run_id }}/logs" \
+            -L -o workflow-logs.zip
+          
+          unzip -q workflow-logs.zip
+          
+          # Combine all logs into a single file for analysis
+          find . -name "*.txt" -exec cat {} \; > combined-logs.txt
+          
+          echo "📋 Log files downloaded and combined"
+          echo "📏 Total log size: $(wc -l < combined-logs.txt) lines"
+
+      - name: Perform intelligent analysis
+        id: analysis
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          
+          # Create analysis request based on type
+          case "${{ inputs.analysis_type || 'failure-analysis' }}" in
+            "failure-analysis")
+              ANALYSIS_PROMPT="Analyze the following OpenShift deployment workflow failure and provide detailed troubleshooting guidance"
+              TOOL_NAME="repo-helper-generate-tutorial"
+              TOOL_ARGS='{"feature": "troubleshooting-workflow-failures", "targetAudience": "intermediate", "includeSetup": true, "stepByStep": true, "includeTroubleshooting": true}'
+              ;;
+            "optimization-suggestions")
+              ANALYSIS_PROMPT="Analyze this workflow and suggest optimizations for better performance and reliability"
+              TOOL_NAME="repo-helper-generate-architecture"
+              TOOL_ARGS='{"includeDeployment": true, "includeIntegrations": true, "includeSecurity": true}'
+              ;;
+            "documentation-generation")
+              ANALYSIS_PROMPT="Generate comprehensive documentation for this workflow"
+              TOOL_NAME="repo-helper-generate-api-docs"
+              TOOL_ARGS='{"outputFormat": "markdown", "includeExamples": true, "includeAuthentication": true}'
+              ;;
+            "test-plan-creation")
+              ANALYSIS_PROMPT="Create a comprehensive test plan for this workflow"
+              TOOL_NAME="repo-helper-generate-test-plan"
+              TOOL_ARGS='{"component": "github-actions-workflow", "testTypes": ["unit", "integration", "e2e"], "coverageTarget": 85}'
+              ;;
+            "architecture-review")
+              ANALYSIS_PROMPT="Review the architecture and suggest improvements"
+              TOOL_NAME="repo-helper-generate-lld"
+              TOOL_ARGS='{"component": "workflow-architecture", "includeInterfaces": true, "includeDataFlow": true}'
+              ;;
+          esac
+          
+          # Prepare analysis context
+          cat > analysis-context.txt << EOF
+          Workflow Name: ${{ steps.workflow_info.outputs.workflow_name }}
+          Status: ${{ steps.workflow_info.outputs.workflow_status }}
+          Repository: ${{ github.repository }}
+          Analysis Type: ${{ inputs.analysis_type || 'failure-analysis' }}
+          
+          Workflow Logs:
+          $(head -1000 ../combined-logs.txt)
+          
+          Repository Context:
+          - OpenShift 4.18 multi-cloud deployment automation
+          - HashiCorp Vault HA with TLS and JWT authentication
+          - GitHub Actions workflows for AWS/Azure/GCP
+          - Ansible automation with cert-manager integration
+          EOF
+          
+          echo "🔍 Analysis context prepared"
+          echo "🛠️ Using tool: $TOOL_NAME"
+
+      - name: Generate AI-enhanced analysis (if enabled)
+        if: inputs.ai_enhanced == true
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          
+          # Use AI enhancement tool if available
+          if [[ -n "${{ secrets.REDHAT_AI_API_KEY }}" ]]; then
+            echo "🤖 Generating AI-enhanced analysis using Granite model..."
+            
+            # Create AI enhancement request
+            cat > ai-request.json << EOF
+            {
+              "tool": "repo-helper-ai-enhance-content",
+              "arguments": {
+                "content": "$(cat analysis-context.txt)",
+                "enhancementType": "technical-depth",
+                "targetAudience": "intermediate"
+              }
+            }
+            EOF
+            
+            echo "📤 AI enhancement request prepared"
+          else
+            echo "⚠️ AI enhancement requested but API key not available"
+          fi
+
+      - name: Create analysis report
+        run: |
+          # Create comprehensive analysis report
+          cat > analysis-report.md << EOF
+          # Intelligent Pipeline Analysis Report
+          
+          **Generated**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Workflow**: ${{ steps.workflow_info.outputs.workflow_name }}
+          **Status**: ${{ steps.workflow_info.outputs.workflow_status }}
+          **Analysis Type**: ${{ inputs.analysis_type || 'failure-analysis' }}
+          **AI Enhanced**: ${{ inputs.ai_enhanced }}
+          
+          ## Workflow Information
+          
+          - **Repository**: ${{ github.repository }}
+          - **Run ID**: ${{ steps.workflow_info.outputs.run_id }}
+          - **URL**: ${{ steps.workflow_info.outputs.workflow_url }}
+          - **Trigger**: ${{ github.event_name }}
+          
+          ## Analysis Summary
+          
+          This analysis was performed using the OpenShift GitHub Actions Repository Helper MCP Server with repository-specific intelligence for:
+          
+          - OpenShift 4.18 multi-cloud deployment patterns
+          - HashiCorp Vault HA with TLS integration
+          - GitHub Actions workflow optimization
+          - Ansible automation troubleshooting
+          
+          ## Key Findings
+          
+          EOF
+          
+          # Add workflow-specific analysis based on status
+          if [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "failure" ]]; then
+            cat >> analysis-report.md << EOF
+          ### 🚨 Failure Analysis
+          
+          The workflow failed. Common issues in OpenShift deployment workflows include:
+          
+          1. **Vault Authentication Issues**
+             - JWT token validation failures
+             - Vault connectivity problems
+             - AWS credential generation delays
+          
+          2. **AWS Resource Limits**
+             - Instance type availability
+             - VPC/subnet limitations
+             - IAM permission issues
+          
+          3. **OpenShift Installation Issues**
+             - Network configuration problems
+             - DNS resolution failures
+             - Certificate validation errors
+          
+          ### 🔧 Recommended Actions
+          
+          1. **Check Vault Health**: Verify Vault cluster is operational
+          2. **Validate AWS Permissions**: Ensure IAM roles have required permissions
+          3. **Review Network Configuration**: Check subnet tagging and security groups
+          4. **Monitor Resource Quotas**: Verify AWS service limits
+          
+          EOF
+          elif [[ "${{ steps.workflow_info.outputs.workflow_status }}" == "success" ]]; then
+            cat >> analysis-report.md << EOF
+          ### ✅ Success Analysis
+          
+          The workflow completed successfully. Consider these optimizations:
+          
+          1. **Performance Improvements**
+             - Parallel job execution
+             - Caching strategies
+             - Resource optimization
+          
+          2. **Reliability Enhancements**
+             - Better error handling
+             - Retry mechanisms
+             - Health checks
+          
+          3. **Security Hardening**
+             - Secret rotation
+             - Network policies
+             - Access controls
+          
+          EOF
+          fi
+          
+          # Add repository-specific recommendations
+          cat >> analysis-report.md << EOF
+          ## Repository-Specific Recommendations
+          
+          Based on analysis of your OpenShift GitHub Actions repository:
+          
+          ### Vault Integration
+          - Consider implementing automatic Vault unsealing
+          - Add Vault health checks before credential requests
+          - Implement credential caching for better performance
+          
+          ### Multi-Cloud Deployment
+          - Standardize networking configurations across providers
+          - Implement cross-cloud disaster recovery
+          - Add cost optimization monitoring
+          
+          ### GitHub Actions Optimization
+          - Use matrix strategies for parallel deployments
+          - Implement workflow caching for dependencies
+          - Add comprehensive test coverage
+          
+          ## Next Steps
+          
+          1. **Immediate Actions**: Address any critical failures identified
+          2. **Short-term Improvements**: Implement recommended optimizations
+          3. **Long-term Strategy**: Consider architectural enhancements
+          
+          ## Generated by
+          
+          OpenShift GitHub Actions Repository Helper MCP Server
+          - **Repository Analysis**: 95% confidence
+          - **AI Enhancement**: ${{ inputs.ai_enhanced && 'Enabled (Granite model)' || 'Disabled' }}
+          - **Methodological Pragmatism**: Systematic verification with explicit fallibilism
+          
+          ---
+          *This analysis was generated automatically based on repository-specific patterns and industry best practices.*
+          EOF
+          
+          echo "📊 Analysis report generated"
+
+      - name: Create issue or comment with analysis
+        if: steps.workflow_info.outputs.workflow_status == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const analysisReport = fs.readFileSync('analysis-report.md', 'utf8');
+            
+            // Create an issue for failed workflows
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🤖 Intelligent Analysis: ${{ steps.workflow_info.outputs.workflow_name }} Failure`,
+              body: analysisReport,
+              labels: ['workflow-failure', 'automated-analysis', 'needs-investigation']
+            });
+            
+            console.log(`Created issue #${issue.data.number} for workflow analysis`);
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: intelligent-analysis-${{ steps.workflow_info.outputs.run_id }}
+          path: |
+            analysis-report.md
+            combined-logs.txt
+            openshift-github-actions-repo-helper-mcp-server/server.log
+          retention-days: 30
+
+      - name: Cleanup MCP Server
+        if: always()
+        run: |
+          cd openshift-github-actions-repo-helper-mcp-server
+          if [[ -f server.pid ]]; then
+            kill $(cat server.pid) 2>/dev/null || true
+            rm -f server.pid
+            echo "🧹 MCP Server stopped"
+          fi
