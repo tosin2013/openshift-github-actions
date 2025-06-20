@@ -234,13 +234,38 @@ export class OpenshiftGithubActionsRepoHelperMcpServer {
           type: 'object',
           properties: {
             component: { type: 'string', description: 'Component to test' },
-            testTypes: { 
-              type: 'array', 
+            testTypes: {
+              type: 'array',
               items: { type: 'string', enum: ['unit', 'integration', 'e2e', 'performance'] }
             },
             coverageTarget: { type: 'number', description: 'Target coverage percentage' }
           },
           required: ['component']
+        }
+      });
+    }
+
+    // Add Red Hat AI tools if enabled
+    if (this.config?.redHatAIIntegration && this.redhatAIService) {
+      tools.push({
+        name: 'repo-helper-ai-enhance-content',
+        description: 'Enhance content using Red Hat AI Services (Granite model)',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', description: 'Content to enhance' },
+            enhancementType: {
+              type: 'string',
+              enum: ['clarity', 'completeness', 'accuracy', 'technical-depth'],
+              description: 'Type of enhancement to apply'
+            },
+            targetAudience: {
+              type: 'string',
+              enum: ['beginner', 'intermediate', 'advanced', 'expert'],
+              description: 'Target audience for the content'
+            }
+          },
+          required: ['content', 'enhancementType']
         }
       });
     }
@@ -340,12 +365,14 @@ export class OpenshiftGithubActionsRepoHelperMcpServer {
           return await this.handleTutorialGeneration(args);
         case 'repo-helper-generate-test-plan':
           return await this.handleTestPlanGeneration(args);
+        case 'repo-helper-ai-enhance-content':
+          return await this.handleAIContentEnhancement(args);
         default:
           return {
             content: [
               {
                 type: 'text',
-                text: `Tool ${name} is not yet implemented. Available tools: repo-helper-generate-lld, repo-helper-generate-api-docs, repo-helper-generate-architecture, repo-helper-generate-tutorial, repo-helper-generate-test-plan`
+                text: `Tool ${name} is not yet implemented. Available tools: repo-helper-generate-lld, repo-helper-generate-api-docs, repo-helper-generate-architecture, repo-helper-generate-tutorial, repo-helper-generate-test-plan, repo-helper-ai-enhance-content`
               }
             ]
           };
@@ -493,6 +520,55 @@ export class OpenshiftGithubActionsRepoHelperMcpServer {
         {
           type: 'text',
           text: result.content
+        }
+      ]
+    };
+  }
+
+  /**
+   * Handle AI content enhancement
+   */
+  private async handleAIContentEnhancement(args: Record<string, any>): Promise<any> {
+    if (!this.redhatAIService) {
+      throw new Error('Red Hat AI Service not initialized');
+    }
+
+    const result = await this.redhatAIService.enhanceContent(
+      args['content'] || '',
+      args['enhancementType'] || 'clarity'
+    );
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `# AI-Enhanced Content (Confidence: ${result.confidence}%)
+
+## Original Enhancement Request
+- **Type**: ${args['enhancementType'] || 'clarity'}
+- **Target Audience**: ${args['targetAudience'] || 'not specified'}
+- **Model**: ${result.metadata.model}
+
+## Enhanced Content
+
+${result.content}
+
+## Quality Metrics
+- **Accuracy**: ${result.qualityMetrics.accuracy}%
+- **Completeness**: ${result.qualityMetrics.completeness}%
+- **Consistency**: ${result.qualityMetrics.consistency}%
+- **Overall Quality**: ${result.qualityMetrics.overallQuality}%
+
+## AI Suggestions
+${result.suggestions.map(s => `- ${s}`).join('\n')}
+
+## Processing Details
+- **Processing Time**: ${result.metadata.processingTime}ms
+- **Tokens Used**: ${result.metadata.tokenUsage.totalTokens}
+- **Generated**: ${result.metadata.timestamp.toISOString()}
+
+---
+*Enhanced by Red Hat AI Services using ${result.metadata.model}*`
         }
       ]
     };

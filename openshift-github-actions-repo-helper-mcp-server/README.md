@@ -158,16 +158,30 @@ Once connected to an MCP client, you can verify the server is working by listing
 - `repo-helper-generate-architecture` - Generate architecture guides
 - `repo-helper-generate-tutorial` - Generate learning-oriented tutorials
 - `repo-helper-generate-test-plan` - Generate comprehensive test plans
+- `repo-helper-ai-enhance-content` - Enhance content using Red Hat AI Services (Granite model)
 
 #### Example Tool Usage
-```bash
-# Example: Generate Vault HA Low-Level Design
+
+**Generate Vault HA Low-Level Design:**
+```json
 {
   "tool": "repo-helper-generate-lld",
   "arguments": {
     "component": "vault-ha",
     "includeInterfaces": true,
     "includeDataFlow": true
+  }
+}
+```
+
+**Enhance Content with Red Hat AI (Granite):**
+```json
+{
+  "tool": "repo-helper-ai-enhance-content",
+  "arguments": {
+    "content": "Vault stores secrets and provides encryption",
+    "enhancementType": "technical-depth",
+    "targetAudience": "intermediate"
   }
 }
 ```
@@ -297,12 +311,73 @@ Create `config.json` in the server directory:
     "coverageAnalysis": true
   },
   "redHatAIIntegration": {
-    "endpoint": "https://maas.apps.prod.rhoai.rh-aiservices-bu.com/",
-    "model": "redhat-openshift-ai",
-    "specialization": "documentation-development-qa"
+    "endpoint": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+    "model": "granite-8b-code-instruct-128k",
+    "apiKey": "YOUR_API_KEY_HERE",
+    "specialization": "openshift-kubernetes-vault-documentation"
   }
 }
 ```
+
+## 🤖 Red Hat AI Services (Granite) Integration
+
+The MCP server supports integration with Red Hat AI Services using the Granite model for intelligent content enhancement.
+
+### Setup Red Hat AI Integration
+
+1. **Get your API credentials** from Red Hat AI Services
+2. **Configure the endpoint** in your config file:
+
+```json
+{
+  "redHatAIIntegration": {
+    "endpoint": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+    "model": "granite-8b-code-instruct-128k",
+    "apiKey": "your-actual-api-key-here",
+    "specialization": "openshift-kubernetes-vault-documentation",
+    "timeout": 30000,
+    "maxRetries": 3
+  }
+}
+```
+
+3. **Alternative: Use environment variables**
+
+```bash
+export REDHAT_AI_ENDPOINT="https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443"
+export REDHAT_AI_MODEL="granite-8b-code-instruct-128k"
+export REDHAT_AI_API_KEY="your-api-key-here"
+```
+
+### AI-Enhanced Features
+
+When configured, the server provides:
+
+- **Intelligent Content Enhancement**: Improve clarity, completeness, and technical depth
+- **Repository-Aware AI**: AI understands your OpenShift + Vault + GitHub Actions context
+- **Quality Validation**: AI-powered content review and suggestions
+- **Automatic Fallback**: Graceful degradation if AI service is unavailable
+
+### Example AI Usage
+
+```json
+{
+  "tool": "repo-helper-ai-enhance-content",
+  "arguments": {
+    "content": "Vault is a secrets management tool",
+    "enhancementType": "technical-depth",
+    "targetAudience": "intermediate"
+  }
+}
+```
+
+**Enhancement Types:**
+- `clarity` - Improve readability and structure
+- `completeness` - Add missing information and details
+- `accuracy` - Verify and correct technical details
+- `technical-depth` - Add deeper technical explanations
+
+See `examples/granite-ai-integration.md` for detailed integration guide.
 
 ## 🌍 Running in Different Environments
 

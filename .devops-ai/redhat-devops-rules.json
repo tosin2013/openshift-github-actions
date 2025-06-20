@@ -1,0 +1,155 @@
+{
+  "redhat_enterprise_devops_config": {
+    "environment_type": "enterprise_production",
+    "rhel_version": "9.6",
+    "openshift_version": "4.18.14",
+    "vault_version": "1.15.6",
+    "ansible_version": "2.14.18",
+    "security_compliance": "fips_140_2_ready",
+    "enterprise_features": true
+  },
+  
+  "scope_enforcement": {
+    "strict_mode": true,
+    "enterprise_compliance": true,
+    "security_validation": true,
+    "user_confirmation_required": [
+      "production_deployments",
+      "vault_configuration_changes",
+      "security_policy_modifications",
+      "multi_cloud_deployments",
+      "certificate_operations"
+    ]
+  },
+  
+  "redhat_devops_specific": {
+    "use_openshift_native_operations": true,
+    "integrate_with_vault_ha": true,
+    "ansible_automation_platform": true,
+    "jwt_authentication_preferred": true,
+    "tls_encryption_required": true,
+    "enterprise_rbac_enforcement": true,
+    "multi_cloud_deployment_support": true,
+    "dynamic_credential_management": true
+  },
+  
+  "automation_generation_rules": {
+    "prefer_ansible_playbooks": true,
+    "include_vault_integration": true,
+    "generate_openshift_manifests": true,
+    "implement_security_scanning": true,
+    "create_monitoring_configs": true,
+    "add_compliance_validation": true,
+    "include_disaster_recovery": true,
+    "generate_documentation": true
+  },
+  
+  "security_policies": {
+    "vault_authentication": {
+      "method": "jwt",
+      "audience": "https://github.com/tosin2013",
+      "role": "github-actions-openshift",
+      "ttl": "30m",
+      "max_ttl": "1h"
+    },
+    "aws_credentials": {
+      "type": "dynamic",
+      "ttl": "30m",
+      "role": "openshift-installer",
+      "permissions": "minimal_required"
+    },
+    "tls_configuration": {
+      "cert_manager_integration": true,
+      "auto_renewal": true,
+      "san_validation": true,
+      "ca_verification": true
+    }
+  },
+  
+  "operational_procedures": {
+    "deployment_validation": [
+      "vault_connectivity_check",
+      "jwt_authentication_test",
+      "aws_credentials_validation",
+      "openshift_cluster_health",
+      "certificate_verification"
+    ],
+    "monitoring_requirements": [
+      "vault_cluster_metrics",
+      "openshift_cluster_metrics",
+      "application_performance",
+      "security_events",
+      "compliance_status"
+    ],
+    "backup_procedures": [
+      "vault_data_backup",
+      "openshift_etcd_backup",
+      "configuration_backup",
+      "secrets_backup",
+      "disaster_recovery_testing"
+    ]
+  },
+  
+  "quality_gates": {
+    "security_score_minimum": 85,
+    "reliability_score_minimum": 90,
+    "compliance_score_minimum": 88,
+    "performance_score_minimum": 80,
+    "automation_coverage_minimum": 85
+  },
+  
+  "enterprise_integrations": {
+    "red_hat_subscription_manager": true,
+    "openshift_cluster_manager": true,
+    "ansible_automation_platform": true,
+    "red_hat_quay_registry": false,
+    "red_hat_advanced_cluster_security": false,
+    "red_hat_openshift_data_foundation": false
+  },
+  
+  "development_workflow": {
+    "git_flow_integration": true,
+    "pull_request_validation": true,
+    "automated_testing": true,
+    "security_scanning": true,
+    "compliance_checking": true,
+    "documentation_generation": true
+  },
+  
+  "cloud_provider_configurations": {
+    "aws": {
+      "regions": ["us-east-1", "us-east-2", "us-west-1", "us-west-2"],
+      "instance_types": ["m5.large", "m5.xlarge", "m5.2xlarge"],
+      "storage_classes": ["gp3-csi"],
+      "networking": "vpc_with_private_subnets"
+    },
+    "azure": {
+      "regions": ["eastus", "westus2", "centralus"],
+      "vm_sizes": ["Standard_D4s_v3", "Standard_D8s_v3"],
+      "storage_classes": ["managed-premium"],
+      "networking": "vnet_with_private_subnets"
+    },
+    "gcp": {
+      "regions": ["us-central1", "us-east1", "us-west1"],
+      "machine_types": ["n1-standard-4", "n1-standard-8"],
+      "storage_classes": ["ssd"],
+      "networking": "vpc_with_private_subnets"
+    }
+  },
+  
+  "compliance_frameworks": {
+    "supported_standards": [
+      "NIST_800-53",
+      "SOC_2_Type_II",
+      "ISO_27001",
+      "FIPS_140_2",
+      "Common_Criteria"
+    ],
+    "audit_requirements": {
+      "log_retention": "7_years",
+      "access_logging": "comprehensive",
+      "change_tracking": "immutable",
+      "compliance_reporting": "automated"
+    }
+  }
+}

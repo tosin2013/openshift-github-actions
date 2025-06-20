@@ -1,0 +1,29 @@
+{
+  "diataxisConfig": {
+    "enableTutorials": true,
+    "enableHowTos": true,
+    "enableReference": true,
+    "enableExplanations": true,
+    "outputFormats": ["markdown", "html"]
+  },
+  "developmentSupport": {
+    "generateLLD": true,
+    "generateAPIDocs": true,
+    "generateArchitecture": true,
+    "analyzeCodeStructure": true
+  },
+  "qaAndTesting": {
+    "generateTestPlans": true,
+    "specByExample": true,
+    "qualityWorkflows": true,
+    "coverageAnalysis": true
+  },
+  "redHatAIIntegration": {
+    "endpoint": "https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443",
+    "model": "granite-8b-code-instruct-128k",
+    "apiKey": "YOUR_API_KEY_HERE",
+    "specialization": "openshift-kubernetes-vault-documentation",
+    "timeout": 30000,
+    "maxRetries": 3
+  }
+}
