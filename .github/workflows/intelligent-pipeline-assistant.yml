@@ -112,11 +112,31 @@ jobs:
           # Determine which workflow to analyze
           if [[ -n "${{ inputs.workflow_run_id }}" ]]; then
             RUN_ID="${{ inputs.workflow_run_id }}"
-          else
+          elif [[ -n "${{ github.event.workflow_run.id }}" ]]; then
             RUN_ID="${{ github.event.workflow_run.id }}"
+          else
+            # If no specific run ID, get the most recent failed workflow
+            echo "🔍 No specific run ID provided, finding most recent failed workflow..."
+            RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=failure&per_page=1" | \
+              jq -r '.workflow_runs[0].id // empty')
+
+            if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+              # If no failed workflows, get the most recent completed workflow
+              echo "🔍 No recent failures, analyzing most recent completed workflow..."
+              RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=completed&per_page=1" | \
+                jq -r '.workflow_runs[0].id // empty')
+            fi
+
+            if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+              echo "❌ No workflow runs found to analyze"
+              exit 1
+            fi
           fi
-          
+
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "🎯 Analyzing workflow run ID: $RUN_ID"
           
           # Get workflow details using GitHub API
           WORKFLOW_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
@@ -136,18 +156,31 @@ jobs:
 
       - name: Download workflow logs
         run: |
-          # Download logs for analysis
-          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          RUN_ID="${{ steps.workflow_info.outputs.run_id }}"
+          echo "📥 Downloading logs for workflow run: $RUN_ID"
+
+          # Download logs for analysis with error handling
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.workflow_info.outputs.run_id }}/logs" \
-            -L -o workflow-logs.zip
-          
-          unzip -q workflow-logs.zip
-          
-          # Combine all logs into a single file for analysis
-          find . -name "*.txt" -exec cat {} \; > combined-logs.txt
-          
-          echo "📋 Log files downloaded and combined"
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/logs" \
+            -L -o workflow-logs.zip)
+
+          if [[ "$HTTP_STATUS" != "200" ]]; then
+            echo "⚠️ Failed to download logs (HTTP $HTTP_STATUS), creating placeholder"
+            echo "No logs available for analysis" > combined-logs.txt
+          else
+            # Check if the downloaded file is a valid zip
+            if file workflow-logs.zip | grep -q "Zip archive"; then
+              unzip -q workflow-logs.zip
+              # Combine all logs into a single file for analysis
+              find . -name "*.txt" -exec cat {} \; > combined-logs.txt 2>/dev/null || echo "No log files found" > combined-logs.txt
+            else
+              echo "⚠️ Downloaded file is not a valid zip archive, creating placeholder"
+              echo "Logs not available or workflow may still be running" > combined-logs.txt
+            fi
+          fi
+
+          echo "📋 Log files processed"
           echo "📏 Total log size: $(wc -l < combined-logs.txt) lines"
 
       - name: Perform intelligent analysis
