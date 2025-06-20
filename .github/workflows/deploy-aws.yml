@@ -192,13 +192,23 @@ jobs:
           set -e
           echo "🔑 Retrieving secrets from Vault..."
           
+          # Ensure jq is available
+          which jq || (echo "Installing jq..." && sudo apt-get update && sudo apt-get install -y jq)
+          
+          # Debug environment
+          echo "Debug: VAULT_ADDR = $VAULT_ADDR"
+          echo "Debug: VAULT_TOKEN = ${VAULT_TOKEN:0:10}..."
+          
           # Get AWS credentials
           echo "Getting AWS credentials..."
           AWS_CREDS=$(curl -k -s -H "X-Vault-Token: $VAULT_TOKEN" \
             "$VAULT_ADDR/v1/aws/creds/openshift-installer")
           
+          echo "Debug: AWS_CREDS response = $AWS_CREDS"
+          
           if [ "$(echo "$AWS_CREDS" | jq -r '.data')" = "null" ]; then
             echo "❌ Failed to get AWS credentials from Vault"
+            echo "Response: $AWS_CREDS"
             exit 1
           fi
           
@@ -212,12 +222,11 @@ jobs:
           
           if [ "$(echo "$PULL_SECRET_DATA" | jq -r '.data')" = "null" ]; then
             echo "❌ Failed to get pull secret from Vault"
+            echo "Response: $PULL_SECRET_DATA"
             exit 1
           fi
           
-          echo "PULL_SECRET<<EOF" >> $GITHUB_ENV
-          echo "$PULL_SECRET_DATA" | jq -r '.data.data.pullSecret' >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "PULL_SECRET=$(echo "$PULL_SECRET_DATA" | jq -r '.data.data.pullSecret')" >> $GITHUB_ENV
           
           # Get SSH keys
           echo "Getting SSH keys..."
@@ -226,16 +235,12 @@ jobs:
           
           if [ "$(echo "$SSH_KEY_DATA" | jq -r '.data')" = "null" ]; then
             echo "❌ Failed to get SSH keys from Vault"
+            echo "Response: $SSH_KEY_DATA"
             exit 1
           fi
           
-          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-          echo "$SSH_KEY_DATA" | jq -r '.data.data.private_key' >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          
-          echo "SSH_PUBLIC_KEY<<EOF" >> $GITHUB_ENV
-          echo "$SSH_KEY_DATA" | jq -r '.data.data.public_key' >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY=$(echo "$SSH_KEY_DATA" | jq -r '.data.data.private_key')" >> $GITHUB_ENV
+          echo "SSH_PUBLIC_KEY=$(echo "$SSH_KEY_DATA" | jq -r '.data.data.public_key')" >> $GITHUB_ENV
           
           # Get base domain
           echo "Getting base domain..."
@@ -244,6 +249,7 @@ jobs:
           
           if [ "$(echo "$BASE_DOMAIN_DATA" | jq -r '.data')" = "null" ]; then
             echo "❌ Failed to get base domain from Vault"
+            echo "Response: $BASE_DOMAIN_DATA"
             exit 1
           fi
           
