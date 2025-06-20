@@ -149,6 +149,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Install system dependencies
+          sudo apt-get update && sudo apt-get install -y jq curl
+          
+          # Install Python dependencies
           python -m pip install --upgrade pip
           pip install awscli boto3 jinja2 pyyaml
 
