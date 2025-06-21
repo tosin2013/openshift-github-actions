@@ -38,21 +38,35 @@ jobs:
       
       - name: Install dependencies
         run: |
+          # Install system dependencies
+          sudo apt-get update && sudo apt-get install -y jq curl
+
+          # Install Python dependencies
           python -m pip install --upgrade pip
           pip install pyyaml requests urllib3 numpy
-      
+
       - name: Run AI-powered validation
         env:
           REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
         run: |
+          # Verify dependencies are available
+          which jq || (echo "jq not found" && exit 1)
+
+          # Check if target directory exists
+          if [ ! -d ".github/workflows" ]; then
+            echo "❌ Error: .github/workflows directory not found"
+            exit 1
+          fi
+
+          # Use the wrapper script instead of calling Python directly
           AUTO_FIX_FLAG=""
           if [ "${{ github.event.inputs.auto_fix }}" = "true" ]; then
-            AUTO_FIX_FLAG="--auto-fix"
+            AUTO_FIX_FLAG="--fix"
           fi
-          
-          python scripts/common/ai-workflow-validator.py \
+
+          # Call the wrapper script with proper parameters
+          ./scripts/common/validate-workflows.sh \
             $AUTO_FIX_FLAG \
-            --output validation-report.json \
             .github/workflows/
       
       - name: Upload validation report
