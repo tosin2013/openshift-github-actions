@@ -49,11 +49,10 @@ jobs:
           # Install Python linting tools
           pip install yamllint
 
-          # Install actionlint using GitHub releases
-          ACTIONLINT_VERSION="1.7.4"
-          curl -L "https://github.com/rhymond/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | tar xz
-          sudo mv actionlint /usr/local/bin/
-          actionlint -version
+      - name: Setup actionlint
+        uses: raven-actions/actionlint@v1
+        with:
+          version: latest
 
       - name: YAML linting
         id: yaml-lint
@@ -94,15 +93,16 @@ jobs:
         id: actionlint
         run: |
           echo "⚡ Running GitHub Actions linting..."
-          
+
           ACTION_ISSUES=0
-          if ! actionlint -color .github/workflows/*.yml; then
+          # Use actionlint from the raven-actions setup
+          if ! actionlint .github/workflows/*.yml; then
             ACTION_ISSUES=1
             echo "status=failed" >> $GITHUB_OUTPUT
           else
             echo "status=success" >> $GITHUB_OUTPUT
           fi
-          
+
           echo "action_issues=$ACTION_ISSUES" >> $GITHUB_OUTPUT
 
       - name: Shell script linting
