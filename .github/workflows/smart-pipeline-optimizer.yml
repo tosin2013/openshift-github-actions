@@ -405,7 +405,7 @@ jobs:
           cd ${{ env.MCP_SERVER_PATH }}
           npm ci
           npm run build
-          ./start-server.sh --daemon
+          ./start-server.sh --background
           sleep 5
 
       - name: Generate AI-powered optimization recommendations

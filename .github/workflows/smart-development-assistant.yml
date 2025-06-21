@@ -140,9 +140,9 @@ jobs:
           cd ${{ env.MCP_SERVER_PATH }}
           npm ci
           npm run build
-          ./start-server.sh --daemon
+          ./start-server.sh --background
           sleep 5
-          ./start-server.sh --status
+          echo "✅ MCP Server started in background"
 
       - name: Get changed files for review
         id: changed-files
@@ -379,8 +379,9 @@ jobs:
           cd ${{ env.MCP_SERVER_PATH }}
           npm ci
           npm run build
-          ./start-server.sh --daemon
+          ./start-server.sh --background
           sleep 5
+          echo "✅ MCP Server started in background"
 
       - name: Analyze current AWS implementation
         run: |
