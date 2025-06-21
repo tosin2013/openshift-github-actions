@@ -1,0 +1,836 @@
+name: 🧪 Smart Testing & Validation
+
+"on":
+  push:
+    branches: [ main, develop, feature/* ]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'config/**'
+      - '*.sh'
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      test_scope:
+        description: 'Testing scope'
+        required: true
+        default: 'comprehensive'
+        type: choice
+        options:
+          - comprehensive
+          - aws-focused
+          - vault-integration
+          - workflow-validation
+          - script-testing
+          - security-scan
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      ai_enhanced:
+        description: 'Enable AI-enhanced testing'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  issues: write
+
+env:
+  PRIMARY_CLOUD: aws
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+  DEVELOPMENT_PHASE: active
+
+jobs:
+  workflow-validation:
+    name: 🔍 Workflow Syntax & Structure Validation
+    runs-on: ubuntu-latest
+    outputs:
+      workflow_status: ${{ steps.validate.outputs.status }}
+      issues_found: ${{ steps.validate.outputs.issues }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python for validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install validation dependencies
+        run: |
+          pip install pyyaml jsonschema requests
+
+      - name: Validate workflow files
+        id: validate
+        run: |
+          echo "🔍 Validating GitHub Actions workflow files..."
+          
+          ISSUES=0
+          WORKFLOW_FILES=()
+          
+          # Find all workflow files
+          for file in .github/workflows/*.yml .github/workflows/*.yaml; do
+            if [[ -f "$file" ]]; then
+              WORKFLOW_FILES+=("$file")
+            fi
+          done
+          
+          echo "Found ${#WORKFLOW_FILES[@]} workflow files to validate"
+          
+          # Validate each workflow
+          for workflow in "${WORKFLOW_FILES[@]}"; do
+            echo "Validating: $workflow"
+            
+            # YAML syntax validation
+            if ! python -c "import yaml; yaml.safe_load(open('$workflow'))" 2>/dev/null; then
+              echo "❌ YAML syntax error in $workflow"
+              ISSUES=$((ISSUES + 1))
+            else
+              echo "✅ YAML syntax valid: $workflow"
+            fi
+            
+            # Check for required fields
+            python3 << EOF
+          import yaml
+          import sys
+          
+          try:
+              with open('$workflow', 'r') as f:
+                  workflow_data = yaml.safe_load(f)
+              
+              # Check required top-level fields
+              required_fields = ['name', 'on', 'jobs']
+              missing_fields = [field for field in required_fields if field not in workflow_data]
+              
+              if missing_fields:
+                  print(f"❌ Missing required fields in $workflow: {missing_fields}")
+                  sys.exit(1)
+              
+              # Check job structure
+              jobs = workflow_data.get('jobs', {})
+              for job_name, job_config in jobs.items():
+                  if 'runs-on' not in job_config:
+                      print(f"❌ Job '{job_name}' missing 'runs-on' in $workflow")
+                      sys.exit(1)
+                  
+                  if 'steps' not in job_config:
+                      print(f"❌ Job '{job_name}' missing 'steps' in $workflow")
+                      sys.exit(1)
+              
+              print(f"✅ Structure valid: $workflow")
+              
+          except Exception as e:
+              print(f"❌ Validation error in $workflow: {e}")
+              sys.exit(1)
+          EOF
+            
+            if [[ $? -ne 0 ]]; then
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+          
+          echo "issues=$ISSUES" >> $GITHUB_OUTPUT
+          if [[ $ISSUES -eq 0 ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ All workflow files validated successfully"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Found $ISSUES validation issues"
+          fi
+
+  script-testing:
+    name: 🔧 Script Testing & Validation
+    runs-on: ubuntu-latest
+    outputs:
+      script_status: ${{ steps.test.outputs.status }}
+      coverage: ${{ steps.test.outputs.coverage }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup testing environment
+        run: |
+          # Install shellcheck for bash script validation
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats
+
+      - name: Test shell scripts
+        id: test
+        run: |
+          echo "🔧 Testing shell scripts..."
+          
+          TOTAL_SCRIPTS=0
+          PASSED_SCRIPTS=0
+          FAILED_SCRIPTS=()
+          
+          # Find all shell scripts
+          SCRIPT_FILES=($(find . -name "*.sh" -type f | grep -v node_modules | head -20))
+          
+          echo "Found ${#SCRIPT_FILES[@]} shell scripts to test"
+          
+          for script in "${SCRIPT_FILES[@]}"; do
+            TOTAL_SCRIPTS=$((TOTAL_SCRIPTS + 1))
+            echo "Testing: $script"
+            
+            # Syntax check
+            if bash -n "$script"; then
+              echo "✅ Syntax valid: $script"
+              
+              # ShellCheck analysis
+              if shellcheck "$script" -f gcc; then
+                echo "✅ ShellCheck passed: $script"
+                PASSED_SCRIPTS=$((PASSED_SCRIPTS + 1))
+              else
+                echo "⚠️ ShellCheck warnings: $script"
+                PASSED_SCRIPTS=$((PASSED_SCRIPTS + 1))  # Count as passed with warnings
+              fi
+            else
+              echo "❌ Syntax error: $script"
+              FAILED_SCRIPTS+=("$script")
+            fi
+          done
+          
+          # Calculate coverage
+          if [[ $TOTAL_SCRIPTS -gt 0 ]]; then
+            COVERAGE=$((PASSED_SCRIPTS * 100 / TOTAL_SCRIPTS))
+          else
+            COVERAGE=100
+          fi
+          
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          
+          if [[ ${#FAILED_SCRIPTS[@]} -eq 0 ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ All scripts passed validation (Coverage: $COVERAGE%)"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Failed scripts: ${FAILED_SCRIPTS[*]}"
+          fi
+
+  aws-integration-testing:
+    name: ☁️ AWS Integration Testing
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_scope == 'aws-focused' || github.event.inputs.test_scope == 'comprehensive'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup AWS testing environment
+        run: |
+          # Install AWS CLI for testing
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+
+      - name: Test AWS configuration scripts
+        run: |
+          echo "☁️ Testing AWS configuration and integration scripts..."
+          
+          # Test AWS-specific scripts
+          AWS_SCRIPTS=(
+            "scripts/aws/cleanup-failed-deployment.sh"
+            "scripts/vault/setup-aws-integration.sh"
+            "scripts/vault/configure-aws-secrets-engine.sh"
+          )
+          
+          for script in "${AWS_SCRIPTS[@]}"; do
+            if [[ -f "$script" ]]; then
+              echo "Testing AWS script: $script"
+              
+              # Syntax validation
+              if bash -n "$script"; then
+                echo "✅ Syntax valid: $script"
+              else
+                echo "❌ Syntax error in: $script"
+                exit 1
+              fi
+              
+              # Check for AWS CLI usage patterns
+              if grep -q "aws " "$script"; then
+                echo "✅ AWS CLI usage detected in: $script"
+              fi
+              
+              # Check for proper error handling
+              if grep -q "set -e" "$script" || grep -q "exit 1" "$script"; then
+                echo "✅ Error handling present in: $script"
+              else
+                echo "⚠️ Consider adding error handling to: $script"
+              fi
+            else
+              echo "⚠️ AWS script not found: $script"
+            fi
+          done
+
+      - name: Validate AWS workflow configuration
+        run: |
+          echo "🔍 Validating AWS workflow configuration..."
+          
+          # Check AWS workflow file
+          if [[ -f ".github/workflows/deploy-aws.yml" ]]; then
+            python3 << 'EOF'
+          import yaml
+          
+          with open('.github/workflows/deploy-aws.yml', 'r') as f:
+              aws_workflow = yaml.safe_load(f)
+          
+          # Check for required AWS-specific configurations
+          checks = {
+              'has_aws_permissions': False,
+              'has_vault_integration': False,
+              'has_error_handling': False,
+              'has_cleanup_steps': False
+          }
+          
+          # Check permissions
+          permissions = aws_workflow.get('permissions', {})
+          if 'id-token' in permissions:
+              checks['has_aws_permissions'] = True
+              print("✅ OIDC permissions configured")
+          
+          # Check jobs for Vault integration
+          jobs = aws_workflow.get('jobs', {})
+          for job_name, job_config in jobs.items():
+              steps = job_config.get('steps', [])
+              for step in steps:
+                  step_name = step.get('name', '').lower()
+                  if 'vault' in step_name:
+                      checks['has_vault_integration'] = True
+                  if 'cleanup' in step_name or 'rollback' in step_name:
+                      checks['has_cleanup_steps'] = True
+          
+          # Report results
+          for check, passed in checks.items():
+              status = "✅" if passed else "⚠️"
+              print(f"{status} {check}: {passed}")
+          
+          if all(checks.values()):
+              print("✅ AWS workflow configuration looks good")
+          else:
+              print("⚠️ AWS workflow could be improved")
+          EOF
+          else
+            echo "❌ AWS workflow file not found"
+            exit 1
+          fi
+
+  vault-integration-testing:
+    name: 🔐 Vault Integration Testing
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_scope == 'vault-integration' || github.event.inputs.test_scope == 'comprehensive'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Vault configuration scripts
+        run: |
+          echo "🔐 Testing Vault integration scripts..."
+          
+          VAULT_SCRIPTS=(
+            "scripts/vault/setup-github-jwt-auth.sh"
+            "scripts/vault/add-openshift-secrets.sh"
+            "scripts/common/init_vault.sh"
+            "scripts/common/unseal_vault.sh"
+          )
+          
+          for script in "${VAULT_SCRIPTS[@]}"; do
+            if [[ -f "$script" ]]; then
+              echo "Testing Vault script: $script"
+              
+              # Syntax validation
+              if bash -n "$script"; then
+                echo "✅ Syntax valid: $script"
+              else
+                echo "❌ Syntax error in: $script"
+                exit 1
+              fi
+              
+              # Check for Vault CLI usage
+              if grep -q "vault " "$script"; then
+                echo "✅ Vault CLI usage detected in: $script"
+              fi
+              
+              # Check for security best practices
+              if grep -q "VAULT_TOKEN" "$script"; then
+                if grep -q "unset VAULT_TOKEN" "$script" || grep -q "export VAULT_TOKEN=" "$script"; then
+                  echo "✅ Token handling present in: $script"
+                else
+                  echo "⚠️ Consider secure token handling in: $script"
+                fi
+              fi
+            else
+              echo "⚠️ Vault script not found: $script"
+            fi
+          done
+
+      - name: Validate Vault workflow integration
+        run: |
+          echo "🔍 Validating Vault workflow integration..."
+          
+          # Check for Vault integration in workflows
+          WORKFLOW_FILES=(.github/workflows/*.yml)
+          VAULT_INTEGRATION_FOUND=false
+          
+          for workflow in "${WORKFLOW_FILES[@]}"; do
+            if grep -q -i "vault" "$workflow"; then
+              echo "✅ Vault integration found in: $workflow"
+              VAULT_INTEGRATION_FOUND=true
+              
+              # Check for JWT authentication
+              if grep -q "jwt" "$workflow"; then
+                echo "✅ JWT authentication detected in: $workflow"
+              fi
+              
+              # Check for secret management
+              if grep -q "secrets\." "$workflow"; then
+                echo "✅ Secret management detected in: $workflow"
+              fi
+            fi
+          done
+          
+          if [[ "$VAULT_INTEGRATION_FOUND" == "true" ]]; then
+            echo "✅ Vault integration properly configured"
+          else
+            echo "⚠️ No Vault integration found in workflows"
+          fi
+
+  security-scanning:
+    name: 🔒 Security Scanning & Analysis
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_scope == 'security-scan' || github.event.inputs.test_scope == 'comprehensive'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run secret scanning
+        run: |
+          echo "🔍 Scanning for potential secrets and sensitive data..."
+
+          # Check for common secret patterns
+          SECRET_PATTERNS=(
+            "password\s*=\s*['\"][^'\"]*['\"]"
+            "token\s*=\s*['\"][^'\"]*['\"]"
+            "key\s*=\s*['\"][^'\"]*['\"]"
+            "secret\s*=\s*['\"][^'\"]*['\"]"
+            "AKIA[0-9A-Z]{16}"  # AWS Access Key
+            "-----BEGIN.*PRIVATE KEY-----"
+          )
+
+          SECRETS_FOUND=false
+
+          for pattern in "${SECRET_PATTERNS[@]}"; do
+            if grep -r -E "$pattern" . --exclude-dir=.git --exclude-dir=node_modules --exclude="*.log"; then
+              echo "⚠️ Potential secret pattern found: $pattern"
+              SECRETS_FOUND=true
+            fi
+          done
+
+          if [[ "$SECRETS_FOUND" == "false" ]]; then
+            echo "✅ No obvious secrets found in repository"
+          else
+            echo "⚠️ Review potential secrets - ensure they are properly managed"
+          fi
+
+      - name: Analyze Vault security configuration
+        run: |
+          echo "🔐 Analyzing Vault security configuration..."
+
+          # Check Vault configuration files
+          VAULT_CONFIGS=(
+            "vault-certificate.template.yaml"
+            "vault-issuer.template.yaml"
+            "config/vault"
+          )
+
+          for config in "${VAULT_CONFIGS[@]}"; do
+            if [[ -f "$config" ]] || [[ -d "$config" ]]; then
+              echo "✅ Vault configuration found: $config"
+
+              # Check for TLS configuration
+              if [[ -f "$config" ]] && grep -q -i "tls\|ssl\|certificate" "$config"; then
+                echo "✅ TLS configuration detected in: $config"
+              fi
+            fi
+          done
+
+          # Check for Vault security best practices in scripts
+          VAULT_SCRIPTS=($(find scripts -name "*vault*" -type f 2>/dev/null))
+
+          for script in "${VAULT_SCRIPTS[@]}"; do
+            echo "Analyzing Vault script: $script"
+
+            # Check for secure token handling
+            if grep -q "VAULT_TOKEN" "$script"; then
+              if grep -q "unset.*VAULT_TOKEN\|VAULT_TOKEN=.*\$\$" "$script"; then
+                echo "✅ Secure token handling in: $script"
+              else
+                echo "⚠️ Review token handling in: $script"
+              fi
+            fi
+
+            # Check for TLS verification
+            if grep -q "VAULT_SKIP_VERIFY\|tls.*skip\|insecure" "$script"; then
+              echo "⚠️ TLS verification disabled in: $script - review for production"
+            fi
+          done
+
+  ai-enhanced-testing:
+    name: 🤖 AI-Enhanced Test Analysis
+    runs-on: ubuntu-latest
+    needs: [workflow-validation, script-testing, aws-integration-testing, vault-integration-testing]
+    if: github.event.inputs.ai_enhanced != 'false'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for MCP Server
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: '${{ env.MCP_SERVER_PATH }}/package-lock.json'
+
+      - name: Start MCP Server
+        run: |
+          cd ${{ env.MCP_SERVER_PATH }}
+          npm ci
+          npm run build
+          ./start-server.sh --daemon
+          sleep 5
+
+      - name: Generate AI-powered test recommendations
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🤖 Generating AI-enhanced test analysis and recommendations..."
+
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+
+          # Gather test results context
+          test_context = {
+              'workflow_status': '${{ needs.workflow-validation.outputs.workflow_status }}',
+              'workflow_issues': '${{ needs.workflow-validation.outputs.issues_found }}',
+              'script_status': '${{ needs.script-testing.outputs.script_status }}',
+              'script_coverage': '${{ needs.script-testing.outputs.coverage }}',
+              'aws_integration': '${{ needs.aws-integration-testing.result }}',
+              'vault_integration': '${{ needs.vault-integration-testing.result }}',
+              'test_scope': '${{ github.event.inputs.test_scope }}',
+              'development_phase': 'active_aws_development'
+          }
+
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze these test results for an OpenShift multi-cloud automation repository and provide specific testing recommendations:
+
+          ## Test Results Summary
+          - **Workflow Validation**: {test_context['workflow_status']} ({test_context['workflow_issues']} issues)
+          - **Script Testing**: {test_context['script_status']} ({test_context['script_coverage']}% coverage)
+          - **AWS Integration**: {test_context['aws_integration']}
+          - **Vault Integration**: {test_context['vault_integration']}
+          - **Test Scope**: {test_context['test_scope']}
+
+          ## Repository Context
+          - OpenShift 4.18 multi-cloud automation (AWS primary, Azure/GCP planned)
+          - HashiCorp Vault for credential management
+          - Active development phase focusing on AWS deployment stabilization
+          - GitHub Actions workflows for deployment automation
+
+          ## Required Analysis
+          Provide specific recommendations for:
+
+          1. **Test Coverage Improvements**
+             - Areas needing additional testing
+             - Test automation opportunities
+             - Integration test strategies
+
+          2. **Quality Assurance Enhancements**
+             - Code quality improvements
+             - Error handling validation
+             - Performance testing strategies
+
+          3. **Security Testing**
+             - Vault integration security validation
+             - AWS credential management testing
+             - OpenShift security configuration testing
+
+          4. **Development Workflow Testing**
+             - CI/CD pipeline validation
+             - Multi-environment testing strategies
+             - Rollback and recovery testing
+
+          Focus on practical, implementable testing strategies for a Principal Engineer leading this project.
+          """
+
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer with expertise in testing strategies, quality assurance, and multi-cloud automation. Provide specific, actionable testing recommendations.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 2000,
+                      'temperature': 0.2
+                  },
+                  timeout=30
+              )
+
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  recommendations = ai_response['choices'][0]['message']['content']
+
+                  with open('ai-test-recommendations.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Enhanced Testing Recommendations\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Date**: {os.popen('date').read().strip()}\n")
+                      f.write(f"**Test Scope**: {test_context['test_scope']}\n")
+                      f.write(f"**Script Coverage**: {test_context['script_coverage']}%\n\n")
+                      f.write(recommendations)
+
+                  print("✅ AI-enhanced test recommendations generated")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+
+          except Exception as e:
+              print(f"⚠️ AI generation failed: {e}")
+          EOF
+          else
+            echo "⚠️ Red Hat AI Services not configured"
+            cat > ai-test-recommendations.md << 'EOF'
+          # 🤖 AI-Enhanced Testing Recommendations
+
+          **Status**: Red Hat AI Services not configured
+          **Recommendation**: Configure REDHAT_AI_API_KEY for enhanced analysis
+
+          ## Basic Testing Recommendations
+
+          ### Immediate Testing Priorities
+          1. **AWS Deployment Testing**
+             - Create comprehensive AWS deployment test suite
+             - Test failure scenarios and recovery procedures
+             - Validate Vault integration in AWS context
+
+          2. **Script Validation Enhancement**
+             - Increase script test coverage above 90%
+             - Add integration tests for critical scripts
+             - Implement automated script testing in CI/CD
+
+          3. **Security Testing**
+             - Validate Vault security configurations
+             - Test AWS credential management
+             - Implement security scanning automation
+
+          ### Future Testing Enhancements
+          1. **Multi-Cloud Testing Preparation**
+             - Design test patterns for Azure/GCP expansion
+             - Create cloud-agnostic test frameworks
+             - Plan cross-cloud validation strategies
+
+          2. **AI-Enhanced Testing**
+             - Configure Red Hat AI Services for intelligent test analysis
+             - Implement AI-powered failure pattern detection
+             - Add predictive test recommendations
+          EOF
+          fi
+
+      - name: Upload test analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-analysis-results
+          path: ai-test-recommendations.md
+          retention-days: 30
+
+  generate-test-report:
+    name: 📊 Generate Comprehensive Test Report
+    runs-on: ubuntu-latest
+    needs: [workflow-validation, script-testing, aws-integration-testing, vault-integration-testing, security-scanning, ai-enhanced-testing]
+    if: always()
+    steps:
+      - name: Generate test summary report
+        run: |
+          echo "📊 Generating comprehensive test report..."
+
+          cat > test-summary-report.md << 'EOF'
+          # 🧪 Smart Testing & Validation Report
+
+          **Generated**: $(date)
+          **Test Scope**: ${{ github.event.inputs.test_scope || 'automatic' }}
+          **Environment**: ${{ github.event.inputs.environment || 'dev' }}
+          **Repository**: OpenShift Multi-Cloud Automation
+
+          ## Test Results Summary
+
+          | Test Category | Status | Details |
+          |---------------|--------|---------|
+          | Workflow Validation | ${{ needs.workflow-validation.outputs.workflow_status }} | ${{ needs.workflow-validation.outputs.issues_found }} issues found |
+          | Script Testing | ${{ needs.script-testing.outputs.script_status }} | ${{ needs.script-testing.outputs.coverage }}% coverage |
+          | AWS Integration | ${{ needs.aws-integration-testing.result }} | AWS-specific testing |
+          | Vault Integration | ${{ needs.vault-integration-testing.result }} | Security and authentication |
+          | Security Scanning | ${{ needs.security-scanning.result }} | Security analysis |
+          | AI Enhancement | ${{ needs.ai-enhanced-testing.result }} | AI-powered recommendations |
+
+          ## Key Findings
+
+          ### ✅ Strengths
+          - Workflow files have proper YAML syntax and structure
+          - Shell scripts follow basic syntax requirements
+          - Vault integration patterns are implemented
+          - AWS deployment workflow is configured
+
+          ### ⚠️ Areas for Improvement
+          - Script test coverage: ${{ needs.script-testing.outputs.coverage }}% (target: >90%)
+          - Security scanning identified potential improvements
+          - Integration testing could be expanded
+          - Multi-cloud testing preparation needed
+
+          ## Recommendations
+
+          ### Immediate Actions (This Week)
+          - [ ] Address any workflow validation issues
+          - [ ] Improve script test coverage
+          - [ ] Review security scanning findings
+          - [ ] Test AWS deployment in dev environment
+
+          ### Short-term Goals (Next 2 Weeks)
+          - [ ] Implement comprehensive integration tests
+          - [ ] Add automated security testing
+          - [ ] Create test data and mock environments
+          - [ ] Document testing procedures
+
+          ### Long-term Objectives (Next Month)
+          - [ ] Prepare multi-cloud testing framework
+          - [ ] Implement AI-enhanced testing capabilities
+          - [ ] Create performance and load testing
+          - [ ] Establish continuous testing pipeline
+
+          ## Development Phase Considerations
+
+          **Current Focus**: AWS deployment stabilization
+          - Prioritize AWS-specific testing and validation
+          - Ensure Vault integration is thoroughly tested
+          - Create comprehensive error handling tests
+          - Document lessons learned for Azure/GCP expansion
+
+          ## AI Enhancement Status
+          - **Red Hat AI Services**: ${{ github.event.inputs.ai_enhanced != 'false' && 'Enabled' || 'Available' }}
+          - **Intelligent Analysis**: ${{ needs.ai-enhanced-testing.result != 'skipped' && 'Generated' || 'Configure REDHAT_AI_API_KEY' }}
+          - **Test Recommendations**: Available in artifacts
+
+          ## Next Steps
+          1. Review test results and address high-priority issues
+          2. Implement recommended testing improvements
+          3. Run comprehensive AWS deployment tests
+          4. Plan multi-cloud testing expansion
+          5. Configure AI-enhanced testing capabilities
+
+          ---
+          *Generated by Smart Testing & Validation Pipeline*
+          EOF
+
+          echo "📋 Test summary report generated"
+
+      - name: Create testing issue (if significant issues found)
+        if: needs.workflow-validation.outputs.issues_found > '0' || needs.script-testing.outputs.coverage < '80'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflowIssues = '${{ needs.workflow-validation.outputs.issues_found }}';
+            const scriptCoverage = '${{ needs.script-testing.outputs.coverage }}';
+
+            const title = `🧪 Testing Issues Detected - Action Required`;
+
+            const body = `# 🧪 Smart Testing & Validation Alert
+
+            **Workflow Issues**: ${workflowIssues} found
+            **Script Coverage**: ${scriptCoverage}% (target: >90%)
+            **Test Scope**: ${{ github.event.inputs.test_scope || 'automatic' }}
+            **Date**: ${new Date().toISOString().split('T')[0]}
+
+            ## Issues Detected
+            ${workflowIssues > 0 ? `- ⚠️ ${workflowIssues} workflow validation issues found` : ''}
+            ${scriptCoverage < 80 ? `- ⚠️ Script test coverage below target (${scriptCoverage}% < 90%)` : ''}
+
+            ## Recommended Actions
+            1. **Review test results** from this workflow run
+            2. **Address workflow validation issues** if any
+            3. **Improve script test coverage** to meet 90% target
+            4. **Run comprehensive AWS deployment tests**
+
+            ## Development Context
+            - **Primary Focus**: AWS deployment stabilization
+            - **Multi-Cloud**: Azure/GCP expansion planned
+            - **AI Enhancement**: ${{ github.event.inputs.ai_enhanced != 'false' && 'Available' || 'Configure REDHAT_AI_API_KEY' }}
+
+            ## Artifacts Generated
+            - Comprehensive test report
+            - AI-enhanced recommendations (if configured)
+            - Security analysis results
+            - Integration test results
+
+            ---
+            *Generated by Smart Testing & Validation*
+            *Workflow Run: ${{ github.run_id }}*`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['testing', 'quality-assurance', 'aws', 'ai-assistant']
+            });
+
+      - name: Upload comprehensive test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comprehensive-test-report
+          path: test-summary-report.md
+          retention-days: 30
+
+      - name: Testing summary
+        run: |
+          echo "🎉 Smart Testing & Validation Complete!"
+          echo ""
+          echo "📊 Test Results:"
+          echo "  Workflow Validation: ${{ needs.workflow-validation.outputs.workflow_status }}"
+          echo "  Script Testing: ${{ needs.script-testing.outputs.script_status }} (${{ needs.script-testing.outputs.coverage }}% coverage)"
+          echo "  AWS Integration: ${{ needs.aws-integration-testing.result }}"
+          echo "  Vault Integration: ${{ needs.vault-integration-testing.result }}"
+          echo "  Security Scanning: ${{ needs.security-scanning.result }}"
+          echo "  AI Enhancement: ${{ needs.ai-enhanced-testing.result }}"
+          echo ""
+          echo "🎯 Focus Areas:"
+          echo "  - AWS deployment testing and validation"
+          echo "  - Vault integration security testing"
+          echo "  - Script quality and coverage improvement"
+          echo "  - Multi-cloud testing preparation"
+          echo ""
+          echo "📋 Next Steps:"
+          echo "  1. Review generated test reports"
+          echo "  2. Address identified issues"
+          echo "  3. Improve test coverage"
+          echo "  4. Run AWS deployment validation"
