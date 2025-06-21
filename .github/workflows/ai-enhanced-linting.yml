@@ -45,13 +45,15 @@ jobs:
           # Install system dependencies
           sudo apt-get update
           sudo apt-get install -y shellcheck jq curl
-          
+
           # Install Python linting tools
           pip install yamllint
 
-          # Install actionlint
-          bash <(curl https://raw.githubusercontent.com/rhymond/actionlint/main/scripts/download-actionlint.bash)
-          sudo mv ./actionlint /usr/local/bin/
+          # Install actionlint using GitHub releases
+          ACTIONLINT_VERSION="1.7.4"
+          curl -L "https://github.com/rhymond/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | tar xz
+          sudo mv actionlint /usr/local/bin/
+          actionlint -version
 
       - name: YAML linting
         id: yaml-lint
