@@ -1,0 +1,228 @@
+name: 'Install System Dependencies'
+description: 'Install system dependencies like jq, curl with proper error handling and validation'
+author: 'OpenShift GitHub Actions Team'
+
+inputs:
+  packages:
+    description: 'Space-separated list of packages to install'
+    required: false
+    default: 'jq curl'
+  max-retries:
+    description: 'Maximum number of retry attempts for package installation'
+    required: false
+    default: '3'
+  retry-delay:
+    description: 'Delay between retry attempts in seconds'
+    required: false
+    default: '5'
+
+outputs:
+  installed-packages:
+    description: 'List of successfully installed packages'
+    value: ${{ steps.install.outputs.installed-packages }}
+  failed-packages:
+    description: 'List of packages that failed to install'
+    value: ${{ steps.install.outputs.failed-packages }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect Operating System
+      id: detect-os
+      shell: bash
+      run: |
+        if [[ -f /etc/os-release ]]; then
+          source /etc/os-release
+          echo "os-family=${ID_LIKE:-$ID}" >> $GITHUB_OUTPUT
+          echo "os-version=${VERSION_ID}" >> $GITHUB_OUTPUT
+          echo "Detected OS: ${ID} ${VERSION_ID} (family: ${ID_LIKE:-$ID})"
+        elif [[ "$RUNNER_OS" == "Linux" ]]; then
+          echo "os-family=ubuntu" >> $GITHUB_OUTPUT
+          echo "os-version=22.04" >> $GITHUB_OUTPUT
+          echo "Assuming Ubuntu 22.04 (GitHub Actions default)"
+        else
+          echo "os-family=unknown" >> $GITHUB_OUTPUT
+          echo "os-version=unknown" >> $GITHUB_OUTPUT
+          echo "Unknown operating system"
+        fi
+
+    - name: Validate Existing Dependencies
+      id: validate
+      shell: bash
+      run: |
+        echo "🔍 Checking existing dependencies..."
+        packages="${{ inputs.packages }}"
+        already_installed=""
+        needs_installation=""
+        
+        for package in $packages; do
+          if command -v "$package" >/dev/null 2>&1; then
+            echo "✅ $package is already installed"
+            already_installed="$already_installed $package"
+          else
+            echo "❌ $package is not installed"
+            needs_installation="$needs_installation $package"
+          fi
+        done
+        
+        echo "already-installed=${already_installed# }" >> $GITHUB_OUTPUT
+        echo "needs-installation=${needs_installation# }" >> $GITHUB_OUTPUT
+        
+        if [[ -z "${needs_installation# }" ]]; then
+          echo "🎉 All dependencies are already installed!"
+          echo "skip-installation=true" >> $GITHUB_OUTPUT
+        else
+          echo "📦 Need to install:$needs_installation"
+          echo "skip-installation=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install Dependencies with Retry Logic
+      id: install
+      if: steps.validate.outputs.skip-installation == 'false'
+      shell: bash
+      run: |
+        packages="${{ steps.validate.outputs.needs-installation }}"
+        max_retries="${{ inputs.max-retries }}"
+        retry_delay="${{ inputs.retry-delay }}"
+        os_family="${{ steps.detect-os.outputs.os-family }}"
+        
+        installed_packages=""
+        failed_packages=""
+        
+        echo "🚀 Installing dependencies: $packages"
+        echo "📊 OS Family: $os_family"
+        echo "🔄 Max Retries: $max_retries"
+        echo "⏱️  Retry Delay: ${retry_delay}s"
+        
+        # Define installation commands based on OS family
+        if [[ "$os_family" =~ (ubuntu|debian) ]]; then
+          update_cmd="sudo apt-get update -qq"
+          install_cmd="sudo apt-get install -y"
+          check_available_cmd="apt-cache show"
+        elif [[ "$os_family" =~ (rhel|fedora|centos) ]]; then
+          update_cmd="sudo dnf check-update || true"
+          install_cmd="sudo dnf install -y"
+          check_available_cmd="dnf info"
+        else
+          echo "⚠️  Unsupported OS family: $os_family"
+          echo "Attempting with apt-get (GitHub Actions default)..."
+          update_cmd="sudo apt-get update -qq"
+          install_cmd="sudo apt-get install -y"
+          check_available_cmd="apt-cache show"
+        fi
+        
+        # Update package manager
+        echo "📥 Updating package manager..."
+        retry_count=0
+        while [[ $retry_count -lt $max_retries ]]; do
+          if eval "$update_cmd"; then
+            echo "✅ Package manager updated successfully"
+            break
+          else
+            retry_count=$((retry_count + 1))
+            if [[ $retry_count -lt $max_retries ]]; then
+              echo "⚠️  Package manager update failed (attempt $retry_count/$max_retries), retrying in ${retry_delay}s..."
+              sleep "$retry_delay"
+            else
+              echo "❌ Package manager update failed after $max_retries attempts"
+              exit 1
+            fi
+          fi
+        done
+        
+        # Install each package with retry logic
+        for package in $packages; do
+          echo "📦 Installing $package..."
+          
+          # Check if package is available
+          if ! eval "$check_available_cmd $package" >/dev/null 2>&1; then
+            echo "⚠️  Package $package not found in repositories"
+            failed_packages="$failed_packages $package"
+            continue
+          fi
+          
+          retry_count=0
+          package_installed=false
+          
+          while [[ $retry_count -lt $max_retries ]]; do
+            if eval "$install_cmd $package"; then
+              echo "✅ $package installed successfully"
+              installed_packages="$installed_packages $package"
+              package_installed=true
+              break
+            else
+              retry_count=$((retry_count + 1))
+              if [[ $retry_count -lt $max_retries ]]; then
+                echo "⚠️  Installation of $package failed (attempt $retry_count/$max_retries), retrying in ${retry_delay}s..."
+                sleep "$retry_delay"
+              else
+                echo "❌ Installation of $package failed after $max_retries attempts"
+                failed_packages="$failed_packages $package"
+              fi
+            fi
+          done
+        done
+        
+        echo "installed-packages=${installed_packages# }" >> $GITHUB_OUTPUT
+        echo "failed-packages=${failed_packages# }" >> $GITHUB_OUTPUT
+        
+        if [[ -n "${failed_packages# }" ]]; then
+          echo "⚠️  Some packages failed to install: $failed_packages"
+          echo "Consider checking package names or repository availability"
+        fi
+
+    - name: Post-Installation Validation
+      id: validate-final
+      shell: bash
+      run: |
+        echo "🔍 Validating installed dependencies..."
+        packages="${{ inputs.packages }}"
+        validation_passed=true
+        missing_packages=""
+        
+        for package in $packages; do
+          if command -v "$package" >/dev/null 2>&1; then
+            version=$(command -v "$package" | xargs ls -la 2>/dev/null || echo "version info unavailable")
+            echo "✅ $package is available: $version"
+          else
+            echo "❌ $package is still not available after installation"
+            missing_packages="$missing_packages $package"
+            validation_passed=false
+          fi
+        done
+        
+        echo "validation-passed=$validation_passed" >> $GITHUB_OUTPUT
+        echo "missing-packages=${missing_packages# }" >> $GITHUB_OUTPUT
+        
+        if [[ "$validation_passed" == "true" ]]; then
+          echo "🎉 All dependencies are now available!"
+        else
+          echo "❌ Validation failed - missing packages: $missing_packages"
+          echo "This may indicate installation failures or PATH issues"
+        fi
+
+    - name: Generate Installation Summary
+      shell: bash
+      run: |
+        echo "📋 Dependency Installation Summary:"
+        echo "=================================="
+        echo "Requested packages: ${{ inputs.packages }}"
+        echo "Already installed: ${{ steps.validate.outputs.already-installed }}"
+        echo "Newly installed: ${{ steps.install.outputs.installed-packages }}"
+        echo "Failed to install: ${{ steps.install.outputs.failed-packages }}"
+        echo "Final validation: ${{ steps.validate-final.outputs.validation-passed }}"
+        
+        if [[ "${{ steps.validate-final.outputs.validation-passed }}" != "true" ]]; then
+          echo ""
+          echo "⚠️  ATTENTION: Some dependencies are not available!"
+          echo "Missing packages: ${{ steps.validate-final.outputs.missing-packages }}"
+          echo ""
+          echo "Troubleshooting tips:"
+          echo "1. Check if package names are correct for your OS"
+          echo "2. Verify repository availability and network connectivity"
+          echo "3. Check if packages require different names on your OS family"
+          echo "4. Consider using alternative packages or manual installation"
+          
+          # Exit with error if critical packages are missing
+          exit 1
+        fi
