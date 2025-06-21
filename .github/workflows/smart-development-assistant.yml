@@ -554,10 +554,162 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Analyze recent workflow failures
+        run: |
+          echo "🔍 Analyzing recent workflow failures for intelligent insights..."
+
+          # Get recent failed workflow runs
+          gh run list --status failure --limit 5 --json id,name,conclusion,createdAt,url > recent-failures.json
+
+          echo "Recent failures found:"
+          cat recent-failures.json
+
+          # Extract failure details for AI analysis
+          python3 << 'EOF'
+          import json
+          import subprocess
+          import os
+
+          # Load recent failures
+          with open('recent-failures.json', 'r') as f:
+              failures = json.load(f)
+
+          failure_analysis = []
+
+          for failure in failures[:3]:  # Analyze top 3 recent failures
+              run_id = failure['id']
+              workflow_name = failure['name']
+
+              print(f"Analyzing failure: {workflow_name} (ID: {run_id})")
+
+              try:
+                  # Get failure logs
+                  result = subprocess.run(
+                      ['gh', 'run', 'view', str(run_id), '--log-failed'],
+                      capture_output=True, text=True, timeout=30
+                  )
+
+                  if result.returncode == 0:
+                      failure_logs = result.stdout
+                      failure_analysis.append({
+                          'workflow': workflow_name,
+                          'run_id': run_id,
+                          'logs': failure_logs[:2000],  # Limit log size
+                          'url': failure['url']
+                      })
+
+              except Exception as e:
+                  print(f"Could not get logs for {run_id}: {e}")
+
+          # Save failure analysis for AI processing
+          with open('failure-analysis.json', 'w') as f:
+              json.dump(failure_analysis, f, indent=2)
+
+          print(f"Prepared {len(failure_analysis)} failures for AI analysis")
+          EOF
+
+      - name: AI-Enhanced Failure Analysis
+        if: github.event.inputs.ai_enhanced != 'false'
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🤖 Using Red Hat AI Services to analyze failures..."
+
+          if [[ -n "$REDHAT_AI_API_KEY" && -f "failure-analysis.json" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+
+          # Load failure analysis
+          with open('failure-analysis.json', 'r') as f:
+              failures = json.load(f)
+
+          if not failures:
+              print("No recent failures to analyze")
+              with open('ai-failure-analysis.md', 'w') as f:
+                  f.write("# 🤖 AI Failure Analysis\n\nNo recent failures detected. System appears stable.\n")
+              exit(0)
+
+          # Prepare AI analysis request
+          failure_summary = "\n\n".join([
+              f"**Workflow**: {f['workflow']}\n**Run ID**: {f['run_id']}\n**Logs**:\n```\n{f['logs']}\n```"
+              for f in failures
+          ])
+
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze these recent workflow failures in our OpenShift 4.18 multi-cloud automation project:
+
+          {failure_summary}
+
+          Provide:
+          1. Root cause analysis for each failure
+          2. Specific fix recommendations with code examples
+          3. Prevention strategies to avoid similar issues
+          4. Priority assessment (Critical/High/Medium/Low)
+          5. Implementation steps for fixes
+
+          Focus on practical, implementable solutions for a production OpenShift environment.
+          """
+
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer with expertise in GitHub Actions, HashiCorp Vault, and multi-cloud automation. Provide specific, actionable technical solutions.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 2000,
+                      'temperature': 0.3
+                  },
+                  timeout=30
+              )
+
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  analysis = ai_response['choices'][0]['message']['content']
+
+                  with open('ai-failure-analysis.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Powered Failure Analysis\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Analysis Date**: {os.popen('date').read().strip()}\n\n")
+                      f.write(analysis)
+
+                  print("✅ AI failure analysis completed")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  with open('ai-failure-analysis.md', 'w') as f:
+                      f.write("# 🤖 AI Failure Analysis\n\nAI analysis temporarily unavailable. Manual review recommended.\n")
+
+          except Exception as e:
+              print(f"❌ AI analysis failed: {e}")
+              with open('ai-failure-analysis.md', 'w') as f:
+                  f.write("# 🤖 AI Failure Analysis\n\nAI analysis failed. Manual review recommended.\n")
+          EOF
+          else
+            echo "⚠️ AI analysis skipped (no API key or no failures)"
+            echo "# 🤖 AI Failure Analysis\n\nAI analysis skipped." > ai-failure-analysis.md
+          fi
+
       - name: Generate development insights
         run: |
-          echo "📊 Generating development insights..."
+          echo "📊 Generating comprehensive development insights..."
 
+          # Combine AI analysis with standard insights
           cat > development-insights.md << 'EOF'
           # 📊 Smart Development Insights
 
@@ -578,7 +730,17 @@ jobs:
           - 🔄 **Pipeline Status**: Active development and testing
           - 🌐 **Multi-Cloud**: Planned expansion to Azure/GCP
           - 🤖 **AI Integration**: Red Hat AI Services (Granite) available
+          EOF
 
+          # Include AI failure analysis if available
+          if [[ -f "ai-failure-analysis.md" ]]; then
+            echo "" >> development-insights.md
+            cat ai-failure-analysis.md >> development-insights.md
+            echo "" >> development-insights.md
+          fi
+
+          # Continue with standard recommendations
+          cat >> development-insights.md << 'EOF'
           ## Recommendations
 
           ### Immediate Actions
@@ -630,6 +792,14 @@ jobs:
         with:
           name: development-insights
           path: development-insights.md
+          retention-days: 30
+
+      - name: Upload AI failure analysis
+        if: github.event.inputs.ai_enhanced != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-failure-analysis
+          path: ai-failure-analysis.md
           retention-days: 30
 
       - name: Summary
