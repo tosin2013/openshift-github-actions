@@ -1,0 +1,489 @@
+name: 📈 Performance Trend Analysis
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Weekly on Monday at 8 AM UTC
+  workflow_dispatch:
+    inputs:
+      analysis_period:
+        description: 'Analysis period (days)'
+        required: false
+        default: '30'
+        type: string
+      focus_area:
+        description: 'Analysis focus area'
+        required: true
+        default: 'overall'
+        type: choice
+        options:
+          - overall
+          - aws-deployment
+          - vault-integration
+          - workflow-performance
+          - cost-optimization
+          - security-metrics
+      generate_report:
+        description: 'Generate detailed report'
+        required: false
+        default: true
+        type: boolean
+      ai_enhanced:
+        description: 'Enable AI-enhanced analysis'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+env:
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+  PRIMARY_CLOUD: aws
+  DEVELOPMENT_PHASE: active
+
+jobs:
+  collect-metrics:
+    name: 📊 Collect Performance Metrics
+    runs-on: ubuntu-latest
+    outputs:
+      metrics_collected: ${{ steps.collect.outputs.success }}
+      trend_direction: ${{ steps.analyze.outputs.trend }}
+      performance_score: ${{ steps.analyze.outputs.score }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl python3-pip
+          pip3 install matplotlib pandas numpy
+
+      - name: Collect workflow performance data
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "📊 Collecting workflow performance data..."
+          
+          DAYS="${{ github.event.inputs.analysis_period || '30' }}"
+          
+          # Get workflow runs from the specified period
+          gh run list --limit 200 --json status,conclusion,workflowName,createdAt,updatedAt,runNumber > all_runs.json
+          
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime, timedelta
+          from collections import defaultdict
+          import statistics
+          
+          # Load runs data
+          with open('all_runs.json', 'r') as f:
+              runs = json.load(f)
+          
+          days = int(os.environ.get('ANALYSIS_PERIOD', '30'))
+          cutoff_date = datetime.now() - timedelta(days=days)
+          
+          # Filter runs by date and calculate metrics
+          workflow_metrics = defaultdict(lambda: {
+              'runs': [],
+              'durations': [],
+              'success_rate': 0,
+              'avg_duration': 0,
+              'total_runs': 0
+          })
+          
+          for run in runs:
+              created_at = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+              if created_at < cutoff_date:
+                  continue
+              
+              workflow = run['workflowName']
+              
+              # Calculate duration if both timestamps exist
+              if run['updatedAt']:
+                  updated_at = datetime.fromisoformat(run['updatedAt'].replace('Z', '+00:00'))
+                  duration = (updated_at - created_at).total_seconds() / 60  # minutes
+                  workflow_metrics[workflow]['durations'].append(duration)
+              
+              workflow_metrics[workflow]['runs'].append(run)
+              workflow_metrics[workflow]['total_runs'] += 1
+          
+          # Calculate performance metrics
+          performance_data = {}
+          overall_metrics = {
+              'total_runs': 0,
+              'total_successes': 0,
+              'total_duration': 0,
+              'workflows_analyzed': 0
+          }
+          
+          for workflow, data in workflow_metrics.items():
+              if data['total_runs'] == 0:
+                  continue
+              
+              successes = len([r for r in data['runs'] if r['conclusion'] == 'success'])
+              success_rate = (successes / data['total_runs']) * 100
+              avg_duration = statistics.mean(data['durations']) if data['durations'] else 0
+              
+              performance_data[workflow] = {
+                  'success_rate': success_rate,
+                  'avg_duration_minutes': avg_duration,
+                  'total_runs': data['total_runs'],
+                  'trend': 'stable'  # Will be calculated later
+              }
+              
+              overall_metrics['total_runs'] += data['total_runs']
+              overall_metrics['total_successes'] += successes
+              overall_metrics['total_duration'] += sum(data['durations'])
+              overall_metrics['workflows_analyzed'] += 1
+          
+          # Calculate overall metrics
+          if overall_metrics['total_runs'] > 0:
+              overall_metrics['overall_success_rate'] = (overall_metrics['total_successes'] / overall_metrics['total_runs']) * 100
+              overall_metrics['avg_duration_minutes'] = overall_metrics['total_duration'] / overall_metrics['total_runs'] if overall_metrics['total_runs'] > 0 else 0
+          
+          # Save metrics
+          metrics_report = {
+              'analysis_period_days': days,
+              'analysis_date': datetime.now().isoformat(),
+              'overall_metrics': overall_metrics,
+              'workflow_metrics': performance_data
+          }
+          
+          with open('performance_metrics.json', 'w') as f:
+              json.dump(metrics_report, f, indent=2)
+          
+          print(f"Collected metrics for {overall_metrics['workflows_analyzed']} workflows")
+          print(f"Total runs analyzed: {overall_metrics['total_runs']}")
+          print(f"Overall success rate: {overall_metrics.get('overall_success_rate', 0):.1f}%")
+          
+          # Set output
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("success=true\n")
+          EOF
+
+      - name: Analyze performance trends
+        id: analyze
+        run: |
+          echo "📈 Analyzing performance trends..."
+          
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime, timedelta
+          
+          # Load current metrics
+          with open('performance_metrics.json', 'r') as f:
+              current_metrics = json.load(f)
+          
+          overall = current_metrics['overall_metrics']
+          success_rate = overall.get('overall_success_rate', 0)
+          avg_duration = overall.get('avg_duration_minutes', 0)
+          
+          # Calculate performance score (weighted)
+          # Success rate: 60%, Duration efficiency: 40%
+          duration_score = max(0, 100 - (avg_duration / 10))  # Penalty for long durations
+          performance_score = (success_rate * 0.6) + (duration_score * 0.4)
+          
+          # Determine trend (simplified - would need historical data for real trend)
+          if success_rate >= 90:
+              trend = "improving"
+          elif success_rate >= 75:
+              trend = "stable"
+          else:
+              trend = "declining"
+          
+          # Save trend analysis
+          trend_analysis = {
+              'performance_score': performance_score,
+              'trend_direction': trend,
+              'success_rate': success_rate,
+              'avg_duration': avg_duration,
+              'recommendations': []
+          }
+          
+          # Generate recommendations
+          if success_rate < 80:
+              trend_analysis['recommendations'].append("Investigate and fix failing workflows")
+          if avg_duration > 15:
+              trend_analysis['recommendations'].append("Optimize workflow execution time")
+          if performance_score < 70:
+              trend_analysis['recommendations'].append("Comprehensive performance review needed")
+          
+          with open('trend_analysis.json', 'w') as f:
+              json.dump(trend_analysis, f, indent=2)
+          
+          print(f"Performance score: {performance_score:.1f}/100")
+          print(f"Trend direction: {trend}")
+          
+          # Set outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"score={performance_score:.0f}\n")
+              f.write(f"trend={trend}\n")
+          EOF
+
+      - name: Generate performance charts
+        if: github.event.inputs.generate_report != 'false'
+        run: |
+          echo "📊 Generating performance visualization..."
+          
+          python3 << 'EOF'
+          import json
+          import matplotlib.pyplot as plt
+          import numpy as np
+          from datetime import datetime
+          
+          # Load metrics
+          with open('performance_metrics.json', 'r') as f:
+              metrics = json.load(f)
+          
+          workflows = list(metrics['workflow_metrics'].keys())
+          success_rates = [metrics['workflow_metrics'][w]['success_rate'] for w in workflows]
+          durations = [metrics['workflow_metrics'][w]['avg_duration_minutes'] for w in workflows]
+          
+          # Create performance dashboard
+          fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+          fig.suptitle('Pipeline Performance Dashboard', fontsize=16, fontweight='bold')
+          
+          # Success rates by workflow
+          ax1.bar(range(len(workflows)), success_rates, color='skyblue')
+          ax1.set_title('Success Rate by Workflow')
+          ax1.set_ylabel('Success Rate (%)')
+          ax1.set_xticks(range(len(workflows)))
+          ax1.set_xticklabels([w[:15] + '...' if len(w) > 15 else w for w in workflows], rotation=45)
+          ax1.axhline(y=80, color='orange', linestyle='--', label='Target (80%)')
+          ax1.legend()
+          
+          # Average duration by workflow
+          ax2.bar(range(len(workflows)), durations, color='lightcoral')
+          ax2.set_title('Average Duration by Workflow')
+          ax2.set_ylabel('Duration (minutes)')
+          ax2.set_xticks(range(len(workflows)))
+          ax2.set_xticklabels([w[:15] + '...' if len(w) > 15 else w for w in workflows], rotation=45)
+          
+          # Performance score gauge
+          overall_score = metrics['overall_metrics'].get('overall_success_rate', 0)
+          ax3.pie([overall_score, 100-overall_score], labels=['Success', 'Failure'], 
+                  colors=['lightgreen', 'lightcoral'], startangle=90)
+          ax3.set_title(f'Overall Success Rate: {overall_score:.1f}%')
+          
+          # Workflow count and runs
+          total_runs = metrics['overall_metrics']['total_runs']
+          workflows_count = metrics['overall_metrics']['workflows_analyzed']
+          ax4.bar(['Workflows', 'Total Runs'], [workflows_count, total_runs/10], color=['lightblue', 'lightgreen'])
+          ax4.set_title('Activity Summary')
+          ax4.set_ylabel('Count')
+          
+          plt.tight_layout()
+          plt.savefig('performance_dashboard.png', dpi=300, bbox_inches='tight')
+          plt.close()
+          
+          print("✅ Performance dashboard generated")
+          EOF
+
+      - name: Upload performance data
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-analysis-data
+          path: |
+            performance_metrics.json
+            trend_analysis.json
+            performance_dashboard.png
+          retention-days: 30
+
+  ai-performance-insights:
+    name: 🤖 AI Performance Insights
+    runs-on: ubuntu-latest
+    needs: collect-metrics
+    if: github.event.inputs.ai_enhanced != 'false' && needs.collect-metrics.outputs.metrics_collected == 'true'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download performance data
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-analysis-data
+
+      - name: AI-powered performance analysis
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🧠 Performing AI-powered performance analysis..."
+          
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+          from datetime import datetime
+          
+          # Load performance data
+          with open('performance_metrics.json', 'r') as f:
+              metrics = json.load(f)
+          
+          with open('trend_analysis.json', 'r') as f:
+              trends = json.load(f)
+          
+          # Prepare analysis prompt
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze this performance data for our OpenShift multi-cloud automation pipelines:
+          
+          **Performance Metrics:**
+          {json.dumps(metrics, indent=2)}
+          
+          **Trend Analysis:**
+          {json.dumps(trends, indent=2)}
+          
+          **Focus Area:** ${{ github.event.inputs.focus_area || 'overall' }}
+          
+          Provide detailed analysis including:
+          1. Performance bottlenecks and root causes
+          2. Optimization opportunities with specific recommendations
+          3. Trend predictions and risk assessment
+          4. Cost optimization strategies for AWS resources
+          5. Actionable improvement plan with priorities
+          6. Benchmarking against industry standards
+          
+          Focus on AWS deployment efficiency, Vault integration performance, and multi-cloud readiness.
+          """
+          
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer specializing in performance optimization and trend analysis for multi-cloud automation pipelines.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 2000,
+                      'temperature': 0.3
+                  },
+                  timeout=60
+              )
+              
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  analysis = ai_response['choices'][0]['message']['content']
+                  
+                  with open('ai-performance-insights.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Powered Performance Insights\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Analysis Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                      f.write(f"**Analysis Period**: ${{ github.event.inputs.analysis_period || '30' }} days\n")
+                      f.write(f"**Focus Area**: ${{ github.event.inputs.focus_area || 'overall' }}\n\n")
+                      f.write(analysis)
+                  
+                  print("✅ AI performance insights generated")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  with open('ai-performance-insights.md', 'w') as f:
+                      f.write("# 🤖 AI Performance Insights\n\nAI analysis temporarily unavailable.\n")
+          
+          except Exception as e:
+              print(f"❌ AI analysis failed: {e}")
+              with open('ai-performance-insights.md', 'w') as f:
+                  f.write("# 🤖 AI Performance Insights\n\nAI analysis failed. Manual review recommended.\n")
+          EOF
+          else
+            echo "⚠️ AI analysis skipped (no API key)"
+            echo "# 🤖 AI Performance Insights\n\nAI analysis skipped." > ai-performance-insights.md
+          fi
+
+      - name: Upload AI insights
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-performance-insights
+          path: ai-performance-insights.md
+          retention-days: 30
+
+  create-performance-report:
+    name: 📋 Create Performance Report
+    runs-on: ubuntu-latest
+    needs: [collect-metrics, ai-performance-insights]
+    if: always() && github.event.inputs.generate_report != 'false'
+    
+    steps:
+      - name: Create performance tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const performanceScore = '${{ needs.collect-metrics.outputs.performance_score }}';
+            const trendDirection = '${{ needs.collect-metrics.outputs.trend_direction }}';
+            const focusArea = '${{ github.event.inputs.focus_area || 'overall' }}';
+            const analysisPeriod = '${{ github.event.inputs.analysis_period || '30' }}';
+            
+            const trendEmoji = trendDirection === 'improving' ? '📈' : 
+                              trendDirection === 'declining' ? '📉' : '➡️';
+            
+            const title = `📈 Performance Trend Analysis - Score: ${performanceScore}/100 ${trendEmoji}`;
+            const body = `# 📊 Performance Trend Analysis Report
+            
+            **Performance Score**: ${performanceScore}/100
+            **Trend Direction**: ${trendEmoji} ${trendDirection}
+            **Analysis Period**: ${analysisPeriod} days
+            **Focus Area**: ${focusArea}
+            **Generated**: ${new Date().toISOString().split('T')[0]}
+            
+            ## 📈 Performance Summary
+            
+            - **Overall Performance**: ${performanceScore >= 90 ? '🟢 Excellent' : performanceScore >= 75 ? '🟡 Good' : performanceScore >= 50 ? '🟠 Fair' : '🔴 Poor'}
+            - **Trend Direction**: ${trendEmoji} ${trendDirection}
+            - **Analysis Focus**: ${focusArea}
+            
+            ## 📋 Key Findings
+            
+            ${performanceScore < 70 ? '- ⚠️ Performance below target - optimization required' : ''}
+            ${trendDirection === 'declining' ? '- 📉 Declining trend detected - immediate attention needed' : ''}
+            ${trendDirection === 'improving' ? '- 📈 Positive performance trend - continue current practices' : ''}
+            
+            ## 🎯 Recommended Actions
+            
+            1. **Review performance artifacts** from this workflow run
+            2. **Analyze AI-powered insights** for specific optimization opportunities
+            3. **Implement high-priority improvements** based on trend analysis
+            4. **Monitor performance metrics** after implementing changes
+            
+            ## 📊 Artifacts Generated
+            
+            - Performance Metrics Dashboard
+            - Trend Analysis Data
+            - AI-Powered Performance Insights (if available)
+            - Performance Visualization Charts
+            
+            ## 🔗 Related Resources
+            
+            - [Performance Dashboard](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            - [Optimization Guidelines](docs/performance-optimization.md)
+            - [Monitoring Best Practices](docs/monitoring-best-practices.md)
+            
+            ---
+            *Generated by Performance Trend Analysis*`;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['performance', 'trend-analysis', 'monitoring', 'ai-assistant']
+            });

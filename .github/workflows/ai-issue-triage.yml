@@ -1,0 +1,360 @@
+name: 🤖 AI-Powered Issue Triage
+
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to triage'
+        required: true
+        type: string
+      force_retriage:
+        description: 'Force re-triage of existing issue'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+
+jobs:
+  ai-triage:
+    name: 🧠 AI Issue Classification
+    runs-on: ubuntu-latest
+    if: github.event.action == 'opened' || github.event.inputs.issue_number
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get issue details
+        id: issue-details
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let issueNumber;
+            let issueData;
+            
+            if (context.payload.issue) {
+              // Triggered by issue event
+              issueNumber = context.payload.issue.number;
+              issueData = context.payload.issue;
+            } else {
+              // Triggered manually
+              issueNumber = '${{ github.event.inputs.issue_number }}';
+              const { data } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: parseInt(issueNumber)
+              });
+              issueData = data;
+            }
+            
+            // Check if already triaged (unless force retriage)
+            const isRetriage = '${{ github.event.inputs.force_retriage }}' === 'true';
+            const hasTriageLabel = issueData.labels.some(label => 
+              label.name.startsWith('triage:') || 
+              label.name.startsWith('priority:') ||
+              label.name.startsWith('component:')
+            );
+            
+            if (hasTriageLabel && !isRetriage) {
+              console.log('Issue already triaged, skipping...');
+              core.setOutput('skip_triage', 'true');
+              return;
+            }
+            
+            core.setOutput('issue_number', issueNumber);
+            core.setOutput('issue_title', issueData.title);
+            core.setOutput('issue_body', issueData.body || '');
+            core.setOutput('issue_author', issueData.user.login);
+            core.setOutput('skip_triage', 'false');
+
+      - name: AI-powered issue classification
+        if: steps.issue-details.outputs.skip_triage != 'true'
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🤖 Performing AI-powered issue classification..."
+          
+          ISSUE_TITLE="${{ steps.issue-details.outputs.issue_title }}"
+          ISSUE_BODY="${{ steps.issue-details.outputs.issue_body }}"
+          ISSUE_AUTHOR="${{ steps.issue-details.outputs.issue_author }}"
+          
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+          import re
+          from datetime import datetime
+          
+          issue_title = os.environ.get('ISSUE_TITLE', '')
+          issue_body = os.environ.get('ISSUE_BODY', '')
+          issue_author = os.environ.get('ISSUE_AUTHOR', '')
+          
+          # Prepare classification prompt
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, classify this GitHub issue for our OpenShift multi-cloud automation project:
+          
+          **Title**: {issue_title}
+          **Author**: {issue_author}
+          **Description**: {issue_body[:1000]}
+          
+          Provide classification in this exact JSON format:
+          {{
+            "category": "bug|feature|documentation|question|enhancement|security",
+            "priority": "critical|high|medium|low",
+            "component": "aws|vault|github-actions|openshift|multi-cloud|documentation|testing",
+            "complexity": "simple|moderate|complex",
+            "estimated_effort": "1-2 hours|half-day|1-2 days|1 week|2+ weeks",
+            "requires_expertise": ["aws", "vault", "openshift", "github-actions"],
+            "suggested_labels": ["label1", "label2", "label3"],
+            "triage_notes": "Brief analysis and recommended next steps",
+            "related_components": ["component1", "component2"],
+            "confidence_score": 0.85
+          }}
+          
+          Focus on OpenShift deployment, AWS integration, Vault secrets management, and GitHub Actions workflows.
+          """
+          
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer specializing in issue triage and classification. Always respond with valid JSON only.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 1000,
+                      'temperature': 0.2
+                  },
+                  timeout=60
+              )
+              
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  analysis = ai_response['choices'][0]['message']['content']
+                  
+                  # Extract JSON from response
+                  json_match = re.search(r'\{.*\}', analysis, re.DOTALL)
+                  if json_match:
+                      classification = json.loads(json_match.group())
+                      
+                      with open('issue-classification.json', 'w') as f:
+                          json.dump(classification, f, indent=2)
+                      
+                      print("✅ AI classification completed")
+                      print(f"Category: {classification.get('category', 'unknown')}")
+                      print(f"Priority: {classification.get('priority', 'unknown')}")
+                      print(f"Component: {classification.get('component', 'unknown')}")
+                  else:
+                      raise ValueError("No valid JSON found in AI response")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  raise Exception(f"AI service returned {response.status_code}")
+          
+          except Exception as e:
+              print(f"❌ AI classification failed: {e}")
+              # Fallback to rule-based classification
+              classification = {
+                  "category": "question",
+                  "priority": "medium", 
+                  "component": "general",
+                  "complexity": "moderate",
+                  "estimated_effort": "half-day",
+                  "requires_expertise": ["general"],
+                  "suggested_labels": ["needs-triage"],
+                  "triage_notes": "AI classification failed, manual review required",
+                  "related_components": [],
+                  "confidence_score": 0.3
+              }
+              
+              # Simple rule-based classification
+              title_lower = issue_title.lower()
+              body_lower = issue_body.lower()
+              
+              if any(word in title_lower for word in ['bug', 'error', 'fail', 'broken']):
+                  classification['category'] = 'bug'
+                  classification['priority'] = 'high'
+              elif any(word in title_lower for word in ['feature', 'enhancement', 'improve']):
+                  classification['category'] = 'enhancement'
+              elif any(word in title_lower for word in ['doc', 'readme', 'guide']):
+                  classification['category'] = 'documentation'
+              
+              if any(word in title_lower + body_lower for word in ['aws', 'ec2', 's3']):
+                  classification['component'] = 'aws'
+              elif any(word in title_lower + body_lower for word in ['vault', 'secret']):
+                  classification['component'] = 'vault'
+              elif any(word in title_lower + body_lower for word in ['workflow', 'action', 'ci']):
+                  classification['component'] = 'github-actions'
+              elif any(word in title_lower + body_lower for word in ['openshift', 'oc', 'cluster']):
+                  classification['component'] = 'openshift'
+              
+              with open('issue-classification.json', 'w') as f:
+                  json.dump(classification, f, indent=2)
+              
+              print("✅ Fallback classification completed")
+          EOF
+          else
+            echo "⚠️ AI classification skipped (no API key)"
+            # Create basic classification
+            cat > issue-classification.json << 'EOF'
+          {
+            "category": "question",
+            "priority": "medium",
+            "component": "general", 
+            "complexity": "moderate",
+            "estimated_effort": "half-day",
+            "requires_expertise": ["general"],
+            "suggested_labels": ["needs-triage"],
+            "triage_notes": "AI classification not available, manual review required",
+            "related_components": [],
+            "confidence_score": 0.1
+          }
+          EOF
+          fi
+
+      - name: Apply classification labels
+        if: steps.issue-details.outputs.skip_triage != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            try {
+              const classification = JSON.parse(fs.readFileSync('issue-classification.json', 'utf8'));
+              const issueNumber = parseInt('${{ steps.issue-details.outputs.issue_number }}');
+              
+              // Prepare labels based on classification
+              const labels = [];
+              
+              // Add category label
+              if (classification.category) {
+                labels.push(`type:${classification.category}`);
+              }
+              
+              // Add priority label
+              if (classification.priority) {
+                labels.push(`priority:${classification.priority}`);
+              }
+              
+              // Add component label
+              if (classification.component) {
+                labels.push(`component:${classification.component}`);
+              }
+              
+              // Add complexity label
+              if (classification.complexity) {
+                labels.push(`complexity:${classification.complexity}`);
+              }
+              
+              // Add suggested labels
+              if (classification.suggested_labels) {
+                labels.push(...classification.suggested_labels);
+              }
+              
+              // Add AI confidence indicator
+              const confidence = classification.confidence_score || 0;
+              if (confidence > 0.8) {
+                labels.push('ai-triage:high-confidence');
+              } else if (confidence > 0.5) {
+                labels.push('ai-triage:medium-confidence');
+              } else {
+                labels.push('ai-triage:low-confidence');
+              }
+              
+              // Apply labels to issue
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: labels
+              });
+              
+              console.log(`Applied labels: ${labels.join(', ')}`);
+              
+            } catch (error) {
+              console.error('Error applying labels:', error);
+            }
+
+      - name: Add triage comment
+        if: steps.issue-details.outputs.skip_triage != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            try {
+              const classification = JSON.parse(fs.readFileSync('issue-classification.json', 'utf8'));
+              const issueNumber = parseInt('${{ steps.issue-details.outputs.issue_number }}');
+              
+              const confidence = classification.confidence_score || 0;
+              const confidenceEmoji = confidence > 0.8 ? '🎯' : confidence > 0.5 ? '🔍' : '❓';
+              
+              const comment = `## 🤖 AI-Powered Issue Triage
+              
+              ${confidenceEmoji} **Classification Confidence**: ${(confidence * 100).toFixed(0)}%
+              
+              ### 📋 Classification Results
+              
+              - **Category**: ${classification.category || 'Unknown'}
+              - **Priority**: ${classification.priority || 'Unknown'}
+              - **Component**: ${classification.component || 'Unknown'}
+              - **Complexity**: ${classification.complexity || 'Unknown'}
+              - **Estimated Effort**: ${classification.estimated_effort || 'Unknown'}
+              
+              ### 🎯 Expertise Required
+              
+              ${classification.requires_expertise ? classification.requires_expertise.map(exp => `- ${exp}`).join('\n') : '- General'}
+              
+              ### 📝 Triage Notes
+              
+              ${classification.triage_notes || 'No specific notes provided.'}
+              
+              ### 🔗 Related Components
+              
+              ${classification.related_components && classification.related_components.length > 0 ? 
+                classification.related_components.map(comp => `- ${comp}`).join('\n') : 
+                'No related components identified.'}
+              
+              ---
+              *Generated by AI-Powered Issue Triage*`;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: comment
+              });
+              
+            } catch (error) {
+              console.error('Error creating triage comment:', error);
+            }
+
+      - name: Upload classification data
+        if: steps.issue-details.outputs.skip_triage != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-classification-${{ steps.issue-details.outputs.issue_number }}
+          path: issue-classification.json
+          retention-days: 30

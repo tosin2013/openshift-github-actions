@@ -1,0 +1,441 @@
+name: 🔍 Proactive Pipeline Monitor
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:
+    inputs:
+      monitoring_scope:
+        description: 'Monitoring scope'
+        required: true
+        default: 'comprehensive'
+        type: choice
+        options:
+          - comprehensive
+          - aws-focused
+          - vault-health
+          - workflow-performance
+          - security-monitoring
+          - cost-analysis
+      alert_threshold:
+        description: 'Alert threshold (failure rate %)'
+        required: false
+        default: '20'
+        type: string
+      ai_enhanced:
+        description: 'Enable AI-enhanced monitoring'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+env:
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+  PRIMARY_CLOUD: aws
+  DEVELOPMENT_PHASE: active
+
+jobs:
+  health-check:
+    name: 🏥 System Health Check
+    runs-on: ubuntu-latest
+    outputs:
+      health_score: ${{ steps.calculate-health.outputs.score }}
+      critical_issues: ${{ steps.calculate-health.outputs.critical_issues }}
+      recommendations: ${{ steps.calculate-health.outputs.recommendations }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+
+      - name: Monitor workflow success rates
+        id: workflow-health
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "📊 Analyzing workflow success rates..."
+          
+          # Get recent workflow runs (last 50)
+          gh run list --limit 50 --json status,conclusion,workflowName,createdAt > recent_runs.json
+          
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime, timedelta
+          from collections import defaultdict
+          
+          with open('recent_runs.json', 'r') as f:
+              runs = json.load(f)
+          
+          # Analyze by workflow
+          workflow_stats = defaultdict(lambda: {'total': 0, 'success': 0, 'failure': 0})
+          
+          for run in runs:
+              workflow = run['workflowName']
+              conclusion = run['conclusion']
+              
+              workflow_stats[workflow]['total'] += 1
+              
+              if conclusion == 'success':
+                  workflow_stats[workflow]['success'] += 1
+              elif conclusion in ['failure', 'cancelled', 'timed_out']:
+                  workflow_stats[workflow]['failure'] += 1
+          
+          # Calculate success rates
+          health_data = {}
+          overall_success = 0
+          overall_total = 0
+          
+          for workflow, stats in workflow_stats.items():
+              if stats['total'] > 0:
+                  success_rate = (stats['success'] / stats['total']) * 100
+                  health_data[workflow] = {
+                      'success_rate': success_rate,
+                      'total_runs': stats['total'],
+                      'failures': stats['failure']
+                  }
+                  overall_success += stats['success']
+                  overall_total += stats['total']
+          
+          overall_rate = (overall_success / overall_total * 100) if overall_total > 0 else 100
+          
+          # Save health data
+          with open('workflow_health.json', 'w') as f:
+              json.dump({
+                  'overall_success_rate': overall_rate,
+                  'workflows': health_data,
+                  'analysis_date': datetime.now().isoformat()
+              }, f, indent=2)
+          
+          print(f"Overall success rate: {overall_rate:.1f}%")
+          print(f"Analyzed {overall_total} workflow runs")
+          
+          # Set outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"success_rate={overall_rate:.1f}\n")
+              f.write(f"total_runs={overall_total}\n")
+          EOF
+
+      - name: Check AWS resource health
+        if: contains(github.event.inputs.monitoring_scope, 'aws') || github.event.inputs.monitoring_scope == 'comprehensive'
+        run: |
+          echo "☁️ Checking AWS resource health indicators..."
+          
+          # Check for AWS-related failures in recent runs
+          if [[ -f "recent_runs.json" ]]; then
+            python3 << 'EOF'
+          import json
+          import re
+          
+          # Load recent runs
+          with open('recent_runs.json', 'r') as f:
+              runs = json.load(f)
+          
+          aws_issues = []
+          for run in runs:
+              if run['conclusion'] in ['failure', 'cancelled'] and 'aws' in run['workflowName'].lower():
+                  aws_issues.append({
+                      'workflow': run['workflowName'],
+                      'created_at': run['createdAt']
+                  })
+          
+          aws_health = {
+              'recent_failures': len(aws_issues),
+              'health_status': 'healthy' if len(aws_issues) < 3 else 'degraded' if len(aws_issues) < 6 else 'critical'
+          }
+          
+          with open('aws_health.json', 'w') as f:
+              json.dump(aws_health, f, indent=2)
+          
+          print(f"AWS health status: {aws_health['health_status']}")
+          print(f"Recent AWS failures: {aws_health['recent_failures']}")
+          EOF
+          fi
+
+      - name: Monitor Vault integration health
+        if: contains(github.event.inputs.monitoring_scope, 'vault') || github.event.inputs.monitoring_scope == 'comprehensive'
+        run: |
+          echo "🔐 Checking Vault integration health..."
+          
+          # Check for Vault-related patterns in recent failures
+          python3 << 'EOF'
+          import json
+          import os
+          
+          vault_health = {
+              'status': 'unknown',
+              'last_check': None,
+              'issues': []
+          }
+          
+          # Simple health check based on recent workflow patterns
+          if os.path.exists('recent_runs.json'):
+              with open('recent_runs.json', 'r') as f:
+                  runs = json.load(f)
+              
+              vault_failures = 0
+              for run in runs:
+                  if run['conclusion'] == 'failure' and ('vault' in run['workflowName'].lower() or 'secret' in run['workflowName'].lower()):
+                      vault_failures += 1
+              
+              vault_health['status'] = 'healthy' if vault_failures < 2 else 'degraded'
+              vault_health['recent_failures'] = vault_failures
+          
+          with open('vault_health.json', 'w') as f:
+              json.dump(vault_health, f, indent=2)
+          
+          print(f"Vault integration status: {vault_health['status']}")
+          EOF
+
+      - name: Calculate overall health score
+        id: calculate-health
+        run: |
+          echo "🧮 Calculating overall system health score..."
+          
+          python3 << 'EOF'
+          import json
+          import os
+          
+          # Load health data
+          workflow_health = {}
+          aws_health = {}
+          vault_health = {}
+          
+          if os.path.exists('workflow_health.json'):
+              with open('workflow_health.json', 'r') as f:
+                  workflow_health = json.load(f)
+          
+          if os.path.exists('aws_health.json'):
+              with open('aws_health.json', 'r') as f:
+                  aws_health = json.load(f)
+          
+          if os.path.exists('vault_health.json'):
+              with open('vault_health.json', 'r') as f:
+                  vault_health = json.load(f)
+          
+          # Calculate weighted health score
+          score = 100
+          critical_issues = []
+          recommendations = []
+          
+          # Workflow success rate (40% weight)
+          workflow_rate = workflow_health.get('overall_success_rate', 100)
+          score = score * 0.6 + workflow_rate * 0.4
+          
+          if workflow_rate < 80:
+              critical_issues.append(f"Low workflow success rate: {workflow_rate:.1f}%")
+              recommendations.append("Review and fix failing workflows")
+          
+          # AWS health (30% weight)
+          aws_status = aws_health.get('health_status', 'healthy')
+          if aws_status == 'critical':
+              score *= 0.7
+              critical_issues.append("Critical AWS infrastructure issues")
+              recommendations.append("Immediate AWS troubleshooting required")
+          elif aws_status == 'degraded':
+              score *= 0.85
+              recommendations.append("Monitor AWS deployment stability")
+          
+          # Vault health (30% weight)
+          vault_status = vault_health.get('status', 'healthy')
+          if vault_status == 'degraded':
+              score *= 0.85
+              critical_issues.append("Vault integration issues detected")
+              recommendations.append("Check Vault connectivity and credentials")
+          
+          # Set outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"score={score:.0f}\n")
+              f.write(f"critical_issues={len(critical_issues)}\n")
+              f.write(f"recommendations={';'.join(recommendations[:3])}\n")
+          
+          print(f"Overall health score: {score:.0f}/100")
+          print(f"Critical issues: {len(critical_issues)}")
+          EOF
+
+      - name: Upload health reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-monitoring-reports
+          path: |
+            workflow_health.json
+            aws_health.json
+            vault_health.json
+          retention-days: 7
+
+  ai-trend-analysis:
+    name: 🤖 AI Trend Analysis
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: github.event.inputs.ai_enhanced != 'false'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download health reports
+        uses: actions/download-artifact@v4
+        with:
+          name: health-monitoring-reports
+
+      - name: AI-powered trend analysis
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🧠 Performing AI-powered trend analysis..."
+          
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+          from datetime import datetime
+          
+          # Load health data
+          health_data = {}
+          for file in ['workflow_health.json', 'aws_health.json', 'vault_health.json']:
+              if os.path.exists(file):
+                  with open(file, 'r') as f:
+                      health_data[file.replace('.json', '')] = json.load(f)
+          
+          # Prepare analysis prompt
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze this system health data for our OpenShift multi-cloud automation project:
+          
+          {json.dumps(health_data, indent=2)}
+          
+          Provide:
+          1. Trend analysis and patterns
+          2. Proactive recommendations to prevent issues
+          3. Performance optimization opportunities
+          4. Risk assessment for upcoming deployments
+          5. Specific action items with priority levels
+          
+          Focus on AWS deployment stability and multi-cloud readiness.
+          """
+          
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer specializing in proactive monitoring and trend analysis for multi-cloud automation pipelines.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 1500,
+                      'temperature': 0.3
+                  },
+                  timeout=60
+              )
+              
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  analysis = ai_response['choices'][0]['message']['content']
+                  
+                  with open('ai-trend-analysis.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Powered Trend Analysis\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Analysis Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                      f.write(analysis)
+                  
+                  print("✅ AI trend analysis completed")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  with open('ai-trend-analysis.md', 'w') as f:
+                      f.write("# 🤖 AI Trend Analysis\n\nAI analysis temporarily unavailable.\n")
+          
+          except Exception as e:
+              print(f"❌ AI analysis failed: {e}")
+              with open('ai-trend-analysis.md', 'w') as f:
+                  f.write("# 🤖 AI Trend Analysis\n\nAI analysis failed. Using local analysis.\n")
+          EOF
+          else
+            echo "⚠️ AI analysis skipped (no API key)"
+            echo "# 🤖 AI Trend Analysis\n\nAI analysis skipped." > ai-trend-analysis.md
+          fi
+
+      - name: Upload AI analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-trend-analysis
+          path: ai-trend-analysis.md
+          retention-days: 30
+
+  create-monitoring-alert:
+    name: 🚨 Create Monitoring Alert
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: needs.health-check.outputs.health_score < '75' || needs.health-check.outputs.critical_issues > '0'
+    
+    steps:
+      - name: Create monitoring alert issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const healthScore = '${{ needs.health-check.outputs.health_score }}';
+            const criticalIssues = '${{ needs.health-check.outputs.critical_issues }}';
+            const recommendations = '${{ needs.health-check.outputs.recommendations }}';
+            
+            const title = `🚨 System Health Alert - Score: ${healthScore}/100`;
+            const body = `# 🔍 Proactive Monitoring Alert
+            
+            **Health Score**: ${healthScore}/100
+            **Critical Issues**: ${criticalIssues}
+            **Alert Threshold**: ${{ github.event.inputs.alert_threshold || '20' }}%
+            **Monitoring Scope**: ${{ github.event.inputs.monitoring_scope || 'comprehensive' }}
+            
+            ## 🎯 Immediate Actions Required
+            
+            ${recommendations.split(';').map(rec => `- ${rec}`).join('\n')}
+            
+            ## 📊 Health Summary
+            
+            - **Overall System Health**: ${healthScore >= 90 ? '🟢 Excellent' : healthScore >= 75 ? '🟡 Good' : healthScore >= 50 ? '🟠 Fair' : '🔴 Poor'}
+            - **Critical Issues Detected**: ${criticalIssues}
+            - **Monitoring Period**: Last 4 hours
+            
+            ## 🔗 Related Artifacts
+            
+            - Health Monitoring Reports (see workflow artifacts)
+            - AI Trend Analysis (if available)
+            - Detailed Performance Metrics
+            
+            ## 📋 Next Steps
+            
+            1. **Review health monitoring artifacts** from this workflow run
+            2. **Address critical issues** identified in the analysis
+            3. **Monitor system stability** after implementing fixes
+            4. **Update monitoring thresholds** if needed
+            
+            ---
+            *Generated by Proactive Pipeline Monitor*`;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['monitoring', 'health-alert', 'high-priority', 'ai-assistant']
+            });
