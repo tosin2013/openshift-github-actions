@@ -656,30 +656,50 @@ jobs:
           Focus on practical, implementable solutions for a production OpenShift environment.
           """
 
-          try:
-              response = requests.post(
-                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
-                  headers={
-                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
-                      'Content-Type': 'application/json'
-                  },
-                  json={
-                      'model': os.environ['REDHAT_AI_MODEL'],
-                      'messages': [
-                          {
-                              'role': 'system',
-                              'content': 'You are a Principal Red Hat OpenShift Engineer with expertise in GitHub Actions, HashiCorp Vault, and multi-cloud automation. Provide specific, actionable technical solutions.'
+          # Retry logic with exponential backoff
+          import time
+          import random
+
+          def call_ai_service_with_retry(max_retries=3, base_delay=10):
+              for attempt in range(max_retries):
+                  try:
+                      print(f"🔄 AI service attempt {attempt + 1}/{max_retries}")
+                      response = requests.post(
+                          os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                          headers={
+                              'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                              'Content-Type': 'application/json'
                           },
-                          {
-                              'role': 'user',
-                              'content': prompt
-                          }
-                      ],
-                      'max_tokens': 2000,
-                      'temperature': 0.3
-                  },
-                  timeout=30
-              )
+                          json={
+                              'model': os.environ['REDHAT_AI_MODEL'],
+                              'messages': [
+                                  {
+                                      'role': 'system',
+                                      'content': 'You are a Principal Red Hat OpenShift Engineer with expertise in GitHub Actions, HashiCorp Vault, and multi-cloud automation. Provide specific, actionable technical solutions.'
+                                  },
+                                  {
+                                      'role': 'user',
+                                      'content': prompt
+                                  }
+                              ],
+                              'max_tokens': 2000,
+                              'temperature': 0.3
+                          },
+                          timeout=60  # Increased timeout to 60 seconds
+                      )
+                      return response
+                  except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                      if attempt == max_retries - 1:
+                          raise e
+                      delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+                      print(f"⏳ Request timeout/connection error, retrying in {delay:.1f} seconds...")
+                      time.sleep(delay)
+                  except Exception as e:
+                      # Don't retry on other errors (auth, etc.)
+                      raise e
+
+          try:
+              response = call_ai_service_with_retry()
 
               if response.status_code == 200:
                   ai_response = response.json()
@@ -705,6 +725,197 @@ jobs:
           else
             echo "⚠️ AI analysis skipped (no API key or no failures)"
             echo "# 🤖 AI Failure Analysis\n\nAI analysis skipped." > ai-failure-analysis.md
+          fi
+
+      - name: Fallback Intelligent Analysis
+        if: always()
+        run: |
+          echo "🧠 Performing fallback intelligent analysis..."
+
+          # Check if AI analysis succeeded
+          if [[ -f "ai-failure-analysis.md" ]] && grep -q "AI analysis temporarily unavailable\|AI analysis failed\|AI analysis skipped" ai-failure-analysis.md; then
+            echo "🔄 AI analysis unavailable, performing local intelligent analysis..."
+
+            python3 << 'EOF'
+          import json
+          import re
+          import os
+          from datetime import datetime
+
+          # Load failure analysis if available
+          failures = []
+          if os.path.exists('failure-analysis.json'):
+              with open('failure-analysis.json', 'r') as f:
+                  failures = json.load(f)
+
+          # Intelligent pattern matching for common issues
+          def analyze_failure_patterns(logs):
+              patterns = {
+                  'jq_missing': {
+                      'pattern': r'jq.*command not found|which jq.*failed|jq.*not installed',
+                      'root_cause': 'Missing jq dependency',
+                      'fix': 'Install jq before using it: sudo apt-get update && sudo apt-get install -y jq',
+                      'priority': 'High',
+                      'prevention': 'Add jq installation to workflow prerequisites'
+                  },
+                  'vault_auth_failed': {
+                      'pattern': r'vault.*authentication failed|vault.*token.*invalid|vault.*permission denied',
+                      'root_cause': 'Vault authentication failure',
+                      'fix': 'Verify VAULT_TOKEN and VAULT_URL are correctly configured in secrets',
+                      'priority': 'Critical',
+                      'prevention': 'Implement Vault token validation before deployment'
+                  },
+                  'aws_credentials': {
+                      'pattern': r'aws.*credentials.*not found|aws.*access.*denied|InvalidAccessKeyId',
+                      'root_cause': 'AWS credentials not configured or invalid',
+                      'fix': 'Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Vault',
+                      'priority': 'Critical',
+                      'prevention': 'Add AWS credential validation step'
+                  },
+                  'github_token': {
+                      'pattern': r'GH_TOKEN.*environment variable|github.*authentication.*failed',
+                      'root_cause': 'GitHub token not configured for CLI access',
+                      'fix': 'Add GH_TOKEN: ${{ github.token }} to workflow environment',
+                      'priority': 'Medium',
+                      'prevention': 'Include GH_TOKEN in all workflows using GitHub CLI'
+                  },
+                  'openshift_cli': {
+                      'pattern': r'oc.*command not found|openshift-install.*not found',
+                      'root_cause': 'OpenShift CLI tools not installed',
+                      'fix': 'Install OpenShift CLI tools before deployment steps',
+                      'priority': 'High',
+                      'prevention': 'Add OpenShift CLI installation to prerequisites'
+                  },
+                  'network_timeout': {
+                      'pattern': r'timeout.*connection|network.*unreachable|connection.*refused',
+                      'root_cause': 'Network connectivity issues',
+                      'fix': 'Check network connectivity and retry with exponential backoff',
+                      'priority': 'Medium',
+                      'prevention': 'Implement retry logic for network operations'
+                  },
+                  'dependency_install_failed': {
+                      'pattern': r'Failed to install|package.*not found|Unable to locate package|E: Package.*has no installation candidate',
+                      'root_cause': 'Package installation failure',
+                      'fix': 'Update package lists first: sudo apt-get update && sudo apt-get install -y <package>',
+                      'priority': 'High',
+                      'prevention': 'Always run apt-get update before installing packages'
+                  },
+                  'docker_permission_denied': {
+                      'pattern': r'docker.*permission denied|Got permission denied while trying to connect to the Docker daemon',
+                      'root_cause': 'Docker permission issues',
+                      'fix': 'Add user to docker group or use sudo: sudo docker <command>',
+                      'priority': 'Medium',
+                      'prevention': 'Configure proper Docker permissions in workflow setup'
+                  },
+                  'disk_space_full': {
+                      'pattern': r'No space left on device|disk.*full|insufficient.*space',
+                      'root_cause': 'Insufficient disk space',
+                      'fix': 'Clean up temporary files and increase disk space allocation',
+                      'priority': 'High',
+                      'prevention': 'Monitor disk usage and implement cleanup procedures'
+                  },
+                  'ai_service_timeout': {
+                      'pattern': r'AI service error: 504|AI analysis failed.*timeout|Red Hat AI.*timeout',
+                      'root_cause': 'Red Hat AI Services timeout',
+                      'fix': 'AI service experiencing high load - local pattern analysis will be used as fallback',
+                      'priority': 'Medium',
+                      'prevention': 'Implement retry logic and local fallback analysis'
+                  }
+              }
+
+              detected_issues = []
+              for issue_type, config in patterns.items():
+                  matches = re.findall(config['pattern'], logs, re.IGNORECASE)
+                  if matches:
+                      # Calculate confidence based on number of matches and pattern specificity
+                      confidence = min(0.95, 0.7 + (len(matches) * 0.1))
+                      detected_issues.append({
+                          'type': issue_type,
+                          'root_cause': config['root_cause'],
+                          'fix': config['fix'],
+                          'priority': config['priority'],
+                          'prevention': config['prevention'],
+                          'confidence': confidence,
+                          'match_count': len(matches)
+                      })
+
+              # Sort by confidence and priority
+              priority_order = {'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1}
+              detected_issues.sort(key=lambda x: (priority_order.get(x['priority'], 0), x['confidence']), reverse=True)
+
+              return detected_issues
+
+          # Analyze failures
+          analysis_results = []
+          for failure in failures:
+              workflow = failure['workflow']
+              run_id = failure['run_id']
+              logs = failure.get('logs', '')
+
+              issues = analyze_failure_patterns(logs)
+              analysis_results.append({
+                  'workflow': workflow,
+                  'run_id': run_id,
+                  'issues': issues,
+                  'url': failure.get('url', '')
+              })
+
+          # Generate intelligent analysis report
+          with open('ai-failure-analysis.md', 'w') as f:
+              f.write("# 🧠 Intelligent Failure Analysis\n\n")
+              f.write(f"**Generated by Local Pattern Analysis**\n")
+              f.write(f"**Analysis Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+              if not analysis_results:
+                  f.write("No recent failures detected. System appears stable.\n")
+              else:
+                  f.write(f"## Analysis Summary\n\n")
+                  f.write(f"Analyzed {len(analysis_results)} recent workflow failures.\n\n")
+
+                  for result in analysis_results:
+                      f.write(f"### {result['workflow']} (Run #{result['run_id']})\n\n")
+                      f.write(f"**URL**: {result['url']}\n\n")
+
+                      if result['issues']:
+                          for issue in result['issues']:
+                              confidence_emoji = "🎯" if issue['confidence'] > 0.9 else "🔍" if issue['confidence'] > 0.8 else "❓"
+                              f.write(f"#### {confidence_emoji} Issue: {issue['root_cause']}\n\n")
+                              f.write(f"**Priority**: {issue['priority']}\n\n")
+                              f.write(f"**Confidence**: {issue['confidence']:.0%} ({issue['match_count']} matches)\n\n")
+                              f.write(f"**Root Cause**: {issue['root_cause']}\n\n")
+                              f.write(f"**Fix**:\n```bash\n{issue['fix']}\n```\n\n")
+                              f.write(f"**Prevention**: {issue['prevention']}\n\n")
+                              f.write("---\n\n")
+                      else:
+                          f.write("No specific patterns detected. Manual review recommended.\n\n")
+
+                  # Generate summary recommendations
+                  all_issues = [issue for result in analysis_results for issue in result['issues']]
+                  critical_issues = [i for i in all_issues if i['priority'] == 'Critical']
+                  high_issues = [i for i in all_issues if i['priority'] == 'High']
+
+                  f.write("## 🎯 Priority Actions\n\n")
+                  if critical_issues:
+                      f.write("### Critical Issues (Immediate Action Required)\n")
+                      for issue in critical_issues:
+                          f.write(f"- **{issue['root_cause']}**: {issue['fix']}\n")
+                      f.write("\n")
+
+                  if high_issues:
+                      f.write("### High Priority Issues\n")
+                      for issue in high_issues:
+                          f.write(f"- **{issue['root_cause']}**: {issue['fix']}\n")
+                      f.write("\n")
+
+                  f.write("## 🛡️ Prevention Strategies\n\n")
+                  prevention_strategies = list(set([i['prevention'] for i in all_issues]))
+                  for strategy in prevention_strategies:
+                      f.write(f"- {strategy}\n")
+
+          print("✅ Intelligent failure analysis completed")
+          EOF
+          else
+            echo "✅ AI analysis succeeded, skipping fallback"
           fi
 
       - name: Generate development insights
