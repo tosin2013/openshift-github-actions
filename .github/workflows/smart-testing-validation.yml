@@ -227,10 +227,15 @@ jobs:
 
       - name: Setup AWS testing environment
         run: |
-          # Install AWS CLI for testing
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
+          # Check if AWS CLI is already installed
+          if command -v aws >/dev/null 2>&1; then
+            echo "✅ AWS CLI already installed: $(aws --version)"
+          else
+            echo "📦 Installing AWS CLI..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+          fi
 
       - name: Test AWS configuration scripts
         run: |

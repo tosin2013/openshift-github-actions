@@ -1,6 +1,6 @@
 name: 🤖 AI-Powered Workflow Validation
 
-"on":
+'on':
   push:
     paths:
       - '.github/workflows/**'
