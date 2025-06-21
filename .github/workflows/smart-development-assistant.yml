@@ -561,7 +561,7 @@ jobs:
           echo "🔍 Analyzing recent workflow failures for intelligent insights..."
 
           # Get recent failed workflow runs
-          gh run list --status failure --limit 5 --json id,name,conclusion,createdAt,url > recent-failures.json
+          gh run list --status failure --limit 5 --json databaseId,name,conclusion,createdAt,url > recent-failures.json
 
           echo "Recent failures found:"
           cat recent-failures.json
@@ -579,7 +579,7 @@ jobs:
           failure_analysis = []
 
           for failure in failures[:3]:  # Analyze top 3 recent failures
-              run_id = failure['id']
+              run_id = failure['databaseId']
               workflow_name = failure['name']
 
               print(f"Analyzing failure: {workflow_name} (ID: {run_id})")
