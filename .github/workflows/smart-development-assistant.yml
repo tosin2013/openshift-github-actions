@@ -555,6 +555,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Analyze recent workflow failures
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "🔍 Analyzing recent workflow failures for intelligent insights..."
 
