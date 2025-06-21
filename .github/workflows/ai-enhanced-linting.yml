@@ -1,0 +1,470 @@
+name: 🔧 AI-Enhanced Linting
+
+"on":
+  push:
+    branches: [ main, develop, feature/* ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      fix_issues:
+        description: 'Auto-fix linting issues where possible'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+
+jobs:
+  comprehensive-linting:
+    name: 🔍 Comprehensive Code Linting
+    runs-on: ubuntu-latest
+    outputs:
+      yaml_status: ${{ steps.yaml-lint.outputs.status }}
+      shell_status: ${{ steps.shell-lint.outputs.status }}
+      security_status: ${{ steps.security-lint.outputs.status }}
+      issues_found: ${{ steps.summary.outputs.issues_found }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linting tools
+        run: |
+          # Install system dependencies
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq curl
+          
+          # Install Python linting tools
+          pip install yamllint
+
+          # Install actionlint
+          bash <(curl https://raw.githubusercontent.com/rhymond/actionlint/main/scripts/download-actionlint.bash)
+          sudo mv ./actionlint /usr/local/bin/
+
+      - name: YAML linting
+        id: yaml-lint
+        run: |
+          echo "🔍 Running YAML linting..."
+          
+          # Create yamllint config
+          cat > .yamllint.yml << 'EOF'
+          extends: default
+          rules:
+            line-length:
+              max: 120
+              level: warning
+            indentation:
+              spaces: 2
+            truthy:
+              allowed-values: ['true', 'false', 'on', 'off', 'yes', 'no']
+              check-keys: false
+            comments:
+              min-spaces-from-content: 1
+            document-start: disable
+          ignore: |
+            node_modules/
+            .git/
+          EOF
+          
+          YAML_ISSUES=0
+          if ! yamllint .github/workflows/; then
+            YAML_ISSUES=1
+            echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "yaml_issues=$YAML_ISSUES" >> $GITHUB_OUTPUT
+
+      - name: GitHub Actions linting
+        id: actionlint
+        run: |
+          echo "⚡ Running GitHub Actions linting..."
+          
+          ACTION_ISSUES=0
+          if ! actionlint -color .github/workflows/*.yml; then
+            ACTION_ISSUES=1
+            echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "action_issues=$ACTION_ISSUES" >> $GITHUB_OUTPUT
+
+      - name: Shell script linting
+        id: shell-lint
+        run: |
+          echo "🐚 Running shell script linting..."
+          
+          SHELL_ISSUES=0
+          SCRIPT_FILES=($(find . -name "*.sh" -type f | grep -v node_modules))
+          
+          echo "Found ${#SCRIPT_FILES[@]} shell scripts to lint"
+          
+          for script in "${SCRIPT_FILES[@]}"; do
+            echo "Checking: $script"
+            if ! shellcheck "$script" -f gcc; then
+              SHELL_ISSUES=1
+            fi
+          done
+          
+          if [[ $SHELL_ISSUES -eq 1 ]]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "shell_issues=$SHELL_ISSUES" >> $GITHUB_OUTPUT
+
+      - name: Security linting
+        id: security-lint
+        run: |
+          echo "🔒 Running security linting..."
+          
+          SECURITY_ISSUES=0
+          
+          # Enhanced secret patterns
+          SECRET_PATTERNS=(
+            "password\s*[:=]\s*[\"'][^\"']{8,}[\"']"
+            "token\s*[:=]\s*[\"'][^\"']{20,}[\"']"
+            "key\s*[:=]\s*[\"'][^\"']{20,}[\"']"
+            "secret\s*[:=]\s*[\"'][^\"']{8,}[\"']"
+            "AKIA[0-9A-Z]{16}"
+            "-----BEGIN.*PRIVATE KEY-----"
+          )
+
+          for pattern in "${SECRET_PATTERNS[@]}"; do
+            if grep -r -E "$pattern" . \
+              --exclude-dir=.git \
+              --exclude-dir=node_modules \
+              --exclude="*.log" | \
+              grep -v "secrets\." | \
+              grep -v "#"; then
+              echo "⚠️ Potential secret pattern found: $pattern"
+              SECURITY_ISSUES=1
+            fi
+          done
+
+          if [[ $SECURITY_ISSUES -eq 1 ]]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "security_issues=$SECURITY_ISSUES" >> $GITHUB_OUTPUT
+
+      - name: Generate linting summary
+        id: summary
+        run: |
+          echo "📋 Generating linting summary..."
+          
+          YAML_ISSUES="${{ steps.yaml-lint.outputs.yaml_issues }}"
+          ACTION_ISSUES="${{ steps.actionlint.outputs.action_issues }}"
+          SHELL_ISSUES="${{ steps.shell-lint.outputs.shell_issues }}"
+          SECURITY_ISSUES="${{ steps.security-lint.outputs.security_issues }}"
+          
+          TOTAL_ISSUES=$((YAML_ISSUES + ACTION_ISSUES + SHELL_ISSUES + SECURITY_ISSUES))
+          
+          echo "Total issues found: $TOTAL_ISSUES"
+          echo "issues_found=$TOTAL_ISSUES" >> $GITHUB_OUTPUT
+          
+          # Create summary report
+          cat > linting-summary.json << EOF
+          {
+            "yaml_linting": "${{ steps.yaml-lint.outputs.status }}",
+            "github_actions_linting": "${{ steps.actionlint.outputs.status }}",
+            "shell_script_linting": "${{ steps.shell-lint.outputs.status }}",
+            "security_linting": "${{ steps.security-lint.outputs.status }}",
+            "total_issues": $TOTAL_ISSUES,
+            "overall_status": "$([ $TOTAL_ISSUES -eq 0 ] && echo "success" || echo "failed")"
+          }
+          EOF
+
+      - name: Upload linting results
+        uses: actions/upload-artifact@v4
+        with:
+          name: linting-results
+          path: linting-summary.json
+          retention-days: 7
+
+  ai-code-quality-analysis:
+    name: 🤖 AI Code Quality Analysis
+    runs-on: ubuntu-latest
+    needs: comprehensive-linting
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download linting results
+        uses: actions/download-artifact@v4
+        with:
+          name: linting-results
+        continue-on-error: true
+
+      - name: AI-powered code quality analysis
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🤖 Performing AI-powered code quality analysis..."
+          
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+          import subprocess
+          from datetime import datetime
+          
+          # Load linting results
+          linting_results = {}
+          try:
+              with open('linting-summary.json', 'r') as f:
+                  linting_results = json.load(f)
+          except:
+              linting_results = {
+                  "yaml_linting": "${{ needs.comprehensive-linting.outputs.yaml_status }}",
+                  "shell_script_linting": "${{ needs.comprehensive-linting.outputs.shell_status }}",
+                  "security_linting": "${{ needs.comprehensive-linting.outputs.security_status }}",
+                  "total_issues": "${{ needs.comprehensive-linting.outputs.issues_found }}",
+                  "overall_status": "failed" if "${{ needs.comprehensive-linting.outputs.issues_found }}" != "0" else "success"
+              }
+          
+          # Get recent commit info for context
+          try:
+              commit_msg = subprocess.check_output(['git', 'log', '-1', '--pretty=%B'], text=True).strip()
+              changed_files = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD~1', 'HEAD'], text=True).strip().split('\n')
+          except:
+              commit_msg = "Unable to retrieve commit message"
+              changed_files = []
+          
+          # Prepare AI analysis prompt
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze these code quality and linting results for our OpenShift multi-cloud automation repository:
+          
+          ## Linting Results Summary
+          {json.dumps(linting_results, indent=2)}
+          
+          ## Recent Changes Context
+          - **Latest Commit**: {commit_msg[:200]}
+          - **Files Changed**: {len(changed_files)} files
+          - **Key Files**: {', '.join(changed_files[:5])}
+          
+          ## Repository Context
+          - OpenShift 4.18 multi-cloud automation (AWS primary focus)
+          - HashiCorp Vault integration for secrets management
+          - GitHub Actions workflows for deployment automation
+          - Active development phase with Smart Pipeline features
+          
+          ## Required Analysis
+          Provide specific recommendations for:
+          
+          1. **Code Quality Improvements**
+             - Specific fixes for failed linting checks
+             - Best practices for OpenShift automation workflows
+             - Consistency improvements across the codebase
+          
+          2. **Security Enhancements**
+             - Security-focused code quality recommendations
+             - Vault integration security best practices
+             - GitHub Actions security hardening
+          
+          3. **Maintainability & Standards**
+             - Code organization and structure improvements
+             - Documentation quality enhancements
+             - Standardization opportunities
+          
+          4. **Smart Pipeline Integration**
+             - How to improve AI-enhanced workflow quality
+             - Automation opportunities for code quality
+             - Integration with existing Smart Pipeline features
+          
+          Focus on actionable, specific recommendations that a Principal Engineer can implement immediately.
+          """
+          
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer specializing in code quality, automation best practices, and multi-cloud infrastructure. Provide specific, actionable recommendations for improving code quality and maintainability.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 2000,
+                      'temperature': 0.3
+                  },
+                  timeout=60
+              )
+              
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  analysis = ai_response['choices'][0]['message']['content']
+                  
+                  with open('ai-code-quality-analysis.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Powered Code Quality Analysis\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Analysis Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                      f.write(f"**Overall Status**: {linting_results.get('overall_status', 'unknown')}\n")
+                      f.write(f"**Total Issues**: {linting_results.get('total_issues', 'unknown')}\n")
+                      f.write(f"**Commit**: {commit_msg[:100]}...\n\n")
+                      f.write(analysis)
+                  
+                  print("✅ AI code quality analysis completed")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  with open('ai-code-quality-analysis.md', 'w') as f:
+                      f.write("# 🤖 AI Code Quality Analysis\n\nAI analysis temporarily unavailable.\n")
+          
+          except Exception as e:
+              print(f"❌ AI analysis failed: {e}")
+              # Fallback to local analysis
+              with open('ai-code-quality-analysis.md', 'w') as f:
+                  f.write(f"# 🤖 AI Code Quality Analysis\n\n")
+                  f.write(f"**Status**: Local analysis (AI unavailable)\n")
+                  f.write(f"**Overall Status**: {linting_results.get('overall_status', 'unknown')}\n")
+                  f.write(f"**Total Issues**: {linting_results.get('total_issues', 'unknown')}\n\n")
+                  f.write("## Local Quality Assessment\n\n")
+                  
+                  if linting_results.get('overall_status') == 'success':
+                      f.write("✅ All linting checks passed - code quality is good!\n\n")
+                      f.write("### Recommendations:\n")
+                      f.write("- Continue following current coding standards\n")
+                      f.write("- Consider adding more comprehensive tests\n")
+                      f.write("- Review security configurations regularly\n")
+                  else:
+                      f.write("❌ Some linting checks failed - review and fix issues:\n\n")
+                      for check, result in linting_results.items():
+                          if result == 'failed':
+                              f.write(f"- **{check}**: Failed - requires attention\n")
+                      f.write("\n### Immediate Actions:\n")
+                      f.write("- Fix failing linting checks\n")
+                      f.write("- Review code quality standards\n")
+                      f.write("- Consider enabling auto-fix features\n")
+          EOF
+          else
+            echo "⚠️ AI analysis skipped (no API key)"
+            cat > ai-code-quality-analysis.md << 'EOF'
+          # 🤖 AI Code Quality Analysis
+          
+          **Status**: AI analysis not configured
+          **Recommendation**: Configure REDHAT_AI_API_KEY for enhanced code quality insights
+          
+          ## Basic Quality Assessment
+          
+          ### Linting Results
+          - YAML Linting: ${{ needs.comprehensive-linting.outputs.yaml_status }}
+          - Shell Script Linting: ${{ needs.comprehensive-linting.outputs.shell_status }}
+          - Security Linting: ${{ needs.comprehensive-linting.outputs.security_status }}
+          - Total Issues: ${{ needs.comprehensive-linting.outputs.issues_found }}
+          
+          ### Recommendations
+          1. **Configure AI Services**: Add REDHAT_AI_API_KEY for intelligent code quality analysis
+          2. **Fix Linting Issues**: Address any failed linting checks above
+          3. **Maintain Standards**: Continue following established coding practices
+          EOF
+          fi
+
+      - name: Upload AI analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-code-quality-analysis
+          path: ai-code-quality-analysis.md
+          retention-days: 30
+
+  create-quality-issue:
+    name: 📋 Create Quality Issue
+    runs-on: ubuntu-latest
+    needs: [comprehensive-linting, ai-code-quality-analysis]
+    if: always() && needs.comprehensive-linting.outputs.issues_found != '0'
+    
+    steps:
+      - name: Download AI analysis
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-code-quality-analysis
+        continue-on-error: true
+
+      - name: Create code quality issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Read AI analysis if available
+            let aiAnalysis = '';
+            try {
+              aiAnalysis = fs.readFileSync('ai-code-quality-analysis.md', 'utf8');
+            } catch (error) {
+              aiAnalysis = 'AI analysis not available';
+            }
+            
+            const issuesFound = '${{ needs.comprehensive-linting.outputs.issues_found }}';
+            const yamlStatus = '${{ needs.comprehensive-linting.outputs.yaml_status }}';
+            const shellStatus = '${{ needs.comprehensive-linting.outputs.shell_status }}';
+            const securityStatus = '${{ needs.comprehensive-linting.outputs.security_status }}';
+            
+            const title = `🔧 Code Quality Issues Detected - ${issuesFound} Issues Found`;
+            const body = `# 🔧 Code Quality Improvement Required
+            
+            **Issues Found**: ${issuesFound}
+            **Workflow Run**: [${context.runId}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            **Commit**: ${context.sha.substring(0, 7)}
+            
+            ## 📊 Linting Results Summary
+            
+            - **YAML Linting**: ${yamlStatus === 'success' ? '✅ Passed' : '❌ Failed'}
+            - **Shell Script Linting**: ${shellStatus === 'success' ? '✅ Passed' : '❌ Failed'}
+            - **Security Linting**: ${securityStatus === 'success' ? '✅ Passed' : '❌ Failed'}
+            
+            ## 🤖 AI-Powered Analysis
+            
+            ${aiAnalysis.length > 50 ? aiAnalysis : 'AI analysis not available - check workflow artifacts'}
+            
+            ## 🎯 Immediate Actions Required
+            
+            1. **Review Failed Checks**: Examine the workflow logs for specific linting errors
+            2. **Fix Issues**: Address the identified code quality problems
+            3. **Test Locally**: Run linting tools locally before pushing
+            4. **Follow Standards**: Ensure code follows established quality standards
+            
+            ## 🔗 Resources
+            
+            - [Workflow Run Details](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            - [AI Code Quality Analysis](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) (check artifacts)
+            
+            ---
+            *Generated by AI-Enhanced Linting Pipeline*`;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['code-quality', 'linting', 'ai-assistant', 'needs-fix']
+            });
