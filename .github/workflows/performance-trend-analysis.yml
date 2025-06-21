@@ -1,6 +1,6 @@
 name: 📈 Performance Trend Analysis
 
-on:
+"on":
   schedule:
     - cron: '0 8 * * 1'  # Weekly on Monday at 8 AM UTC
   workflow_dispatch:

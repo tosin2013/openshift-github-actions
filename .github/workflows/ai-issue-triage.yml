@@ -1,6 +1,6 @@
 name: 🤖 AI-Powered Issue Triage
 
-on:
+"on":
   issues:
     types: [opened, labeled]
   workflow_dispatch:
