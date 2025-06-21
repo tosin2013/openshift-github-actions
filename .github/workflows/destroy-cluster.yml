@@ -1,6 +1,6 @@
 name: Destroy OpenShift Cluster
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       cluster_name:

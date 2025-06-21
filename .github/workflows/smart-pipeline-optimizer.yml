@@ -1,0 +1,729 @@
+name: 🚀 Smart Pipeline Optimizer
+
+"on":
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  workflow_dispatch:
+    inputs:
+      optimization_focus:
+        description: 'Optimization focus area'
+        required: true
+        default: 'performance'
+        type: choice
+        options:
+          - performance
+          - reliability
+          - security
+          - cost
+          - aws-specific
+          - development-workflow
+      analysis_period:
+        description: 'Analysis period (days)'
+        required: false
+        default: '7'
+        type: string
+      ai_enhanced:
+        description: 'Enable AI-enhanced optimization'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+env:
+  MCP_SERVER_PATH: openshift-github-actions-repo-helper-mcp-server
+  PRIMARY_CLOUD: aws
+  DEVELOPMENT_PHASE: active
+
+jobs:
+  analyze-pipeline-performance:
+    name: 📊 Pipeline Performance Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      performance_score: ${{ steps.analysis.outputs.score }}
+      bottlenecks: ${{ steps.analysis.outputs.bottlenecks }}
+      recommendations: ${{ steps.analysis.outputs.recommendations }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python for analysis
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analysis dependencies
+        run: |
+          pip install requests pyyaml matplotlib seaborn pandas
+
+      - name: Analyze recent workflow runs
+        id: analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "📊 Analyzing pipeline performance over last ${{ github.event.inputs.analysis_period || '7' }} days..."
+          
+          python3 << 'EOF'
+          import requests
+          import json
+          import os
+          from datetime import datetime, timedelta
+          
+          # Get workflow runs
+          headers = {'Authorization': f'token {os.environ["GITHUB_TOKEN"]}'}
+          
+          # Calculate date range
+          end_date = datetime.now()
+          start_date = end_date - timedelta(days=int('${{ github.event.inputs.analysis_period || "7" }}'))
+          
+          # Get workflow runs
+          url = f"https://api.github.com/repos/${{ github.repository }}/actions/runs"
+          params = {
+              'created': f'>{start_date.isoformat()}',
+              'per_page': 100
+          }
+          
+          response = requests.get(url, headers=headers, params=params)
+          runs = response.json().get('workflow_runs', [])
+          
+          print(f"📋 Analyzing {len(runs)} workflow runs...")
+          
+          # Analyze performance metrics
+          aws_runs = [r for r in runs if 'aws' in r['name'].lower()]
+          vault_runs = [r for r in runs if 'vault' in r['name'].lower()]
+          
+          performance_data = {
+              'total_runs': len(runs),
+              'aws_runs': len(aws_runs),
+              'vault_runs': len(vault_runs),
+              'success_rate': len([r for r in runs if r['conclusion'] == 'success']) / max(len(runs), 1) * 100,
+              'avg_duration': sum([
+                  (datetime.fromisoformat(r['updated_at'].replace('Z', '+00:00')) - 
+                   datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))).total_seconds() 
+                  for r in runs if r['conclusion'] in ['success', 'failure']
+              ]) / max(len([r for r in runs if r['conclusion'] in ['success', 'failure']]), 1) / 60,  # minutes
+              'failure_rate': len([r for r in runs if r['conclusion'] == 'failure']) / max(len(runs), 1) * 100
+          }
+          
+          # Calculate performance score
+          score = min(100, int(
+              performance_data['success_rate'] * 0.4 +  # 40% weight on success rate
+              max(0, 100 - performance_data['avg_duration']) * 0.3 +  # 30% weight on speed (inverse)
+              max(0, 100 - performance_data['failure_rate']) * 0.3  # 30% weight on reliability
+          ))
+          
+          # Identify bottlenecks
+          bottlenecks = []
+          if performance_data['success_rate'] < 90:
+              bottlenecks.append('low_success_rate')
+          if performance_data['avg_duration'] > 30:
+              bottlenecks.append('long_duration')
+          if performance_data['failure_rate'] > 10:
+              bottlenecks.append('high_failure_rate')
+          
+          # Generate recommendations
+          recommendations = []
+          if 'low_success_rate' in bottlenecks:
+              recommendations.append('Improve error handling and validation steps')
+          if 'long_duration' in bottlenecks:
+              recommendations.append('Implement caching and parallel execution')
+          if 'high_failure_rate' in bottlenecks:
+              recommendations.append('Add retry mechanisms and better monitoring')
+          
+          # Output results
+          print(f"Performance Score: {score}/100")
+          print(f"Success Rate: {performance_data['success_rate']:.1f}%")
+          print(f"Average Duration: {performance_data['avg_duration']:.1f} minutes")
+          print(f"Failure Rate: {performance_data['failure_rate']:.1f}%")
+          
+          # Save for GitHub Actions
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"score={score}\n")
+              f.write(f"bottlenecks={','.join(bottlenecks)}\n")
+              f.write(f"recommendations={';'.join(recommendations)}\n")
+          
+          # Save detailed data
+          with open('performance-data.json', 'w') as f:
+              json.dump(performance_data, f, indent=2)
+          EOF
+
+      - name: Generate performance visualization
+        run: |
+          echo "📈 Generating performance visualization..."
+          
+          python3 << 'EOF'
+          import json
+          import matplotlib.pyplot as plt
+          import matplotlib.patches as patches
+          
+          # Load performance data
+          with open('performance-data.json', 'r') as f:
+              data = json.load(f)
+          
+          # Create performance dashboard
+          fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+          fig.suptitle('OpenShift Multi-Cloud Pipeline Performance Dashboard', fontsize=16)
+          
+          # Success Rate Gauge
+          success_rate = data['success_rate']
+          ax1.pie([success_rate, 100-success_rate], labels=['Success', 'Other'], 
+                  colors=['green', 'lightgray'], startangle=90)
+          ax1.set_title(f'Success Rate: {success_rate:.1f}%')
+          
+          # Duration Analysis
+          avg_duration = data['avg_duration']
+          ax2.bar(['Average Duration'], [avg_duration], color='blue')
+          ax2.set_ylabel('Minutes')
+          ax2.set_title(f'Average Duration: {avg_duration:.1f} min')
+          ax2.axhline(y=30, color='red', linestyle='--', label='Target: 30 min')
+          ax2.legend()
+          
+          # Run Distribution
+          run_types = ['AWS Runs', 'Vault Runs', 'Other Runs']
+          run_counts = [data['aws_runs'], data['vault_runs'], 
+                       data['total_runs'] - data['aws_runs'] - data['vault_runs']]
+          ax3.bar(run_types, run_counts, color=['orange', 'purple', 'gray'])
+          ax3.set_title('Workflow Run Distribution')
+          ax3.set_ylabel('Count')
+          
+          # Performance Score
+          score = min(100, int(success_rate * 0.4 + max(0, 100 - avg_duration) * 0.3 + 
+                              max(0, 100 - data['failure_rate']) * 0.3))
+          
+          # Create score gauge
+          theta = (score / 100) * 180  # Convert to degrees (0-180)
+          ax4.add_patch(patches.Wedge((0, 0), 1, 0, theta, color='green' if score > 80 else 'orange' if score > 60 else 'red'))
+          ax4.add_patch(patches.Wedge((0, 0), 1, theta, 180, color='lightgray'))
+          ax4.set_xlim(-1.2, 1.2)
+          ax4.set_ylim(-0.2, 1.2)
+          ax4.set_aspect('equal')
+          ax4.text(0, -0.1, f'{score}/100', ha='center', va='center', fontsize=14, fontweight='bold')
+          ax4.set_title('Overall Performance Score')
+          ax4.axis('off')
+          
+          plt.tight_layout()
+          plt.savefig('pipeline-performance-dashboard.png', dpi=300, bbox_inches='tight')
+          print("✅ Performance dashboard generated")
+          EOF
+
+  aws-specific-optimization:
+    name: ☁️ AWS-Specific Optimization Analysis
+    runs-on: ubuntu-latest
+    if: github.event.inputs.optimization_focus == 'aws-specific' || github.event.inputs.optimization_focus == 'performance'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Analyze AWS deployment patterns
+        run: |
+          echo "☁️ Analyzing AWS-specific optimization opportunities..."
+          
+          # Analyze AWS workflow structure
+          python3 << 'EOF'
+          import yaml
+          import json
+          
+          # Load AWS workflow
+          with open('.github/workflows/deploy-aws.yml', 'r') as f:
+              aws_workflow = yaml.safe_load(f)
+          
+          optimizations = {
+              'caching_opportunities': [],
+              'parallelization_potential': [],
+              'resource_optimization': [],
+              'security_improvements': []
+          }
+          
+          # Analyze jobs for optimization opportunities
+          jobs = aws_workflow.get('jobs', {})
+          
+          # Check for caching opportunities
+          for job_name, job_config in jobs.items():
+              steps = job_config.get('steps', [])
+              for step in steps:
+                  step_name = step.get('name', '').lower()
+                  if 'install' in step_name and 'openshift' in step_name:
+                      optimizations['caching_opportunities'].append({
+                          'job': job_name,
+                          'step': step.get('name'),
+                          'suggestion': 'Cache OpenShift CLI downloads'
+                      })
+                  elif 'python' in step_name or 'pip' in step_name:
+                      optimizations['caching_opportunities'].append({
+                          'job': job_name,
+                          'step': step.get('name'),
+                          'suggestion': 'Cache Python dependencies'
+                      })
+          
+          # Check for parallelization potential
+          job_dependencies = {}
+          for job_name, job_config in jobs.items():
+              needs = job_config.get('needs', [])
+              if isinstance(needs, str):
+                  needs = [needs]
+              job_dependencies[job_name] = needs
+          
+          # Identify independent jobs that could run in parallel
+          independent_jobs = [job for job, deps in job_dependencies.items() if not deps]
+          if len(independent_jobs) > 1:
+              optimizations['parallelization_potential'].append({
+                  'jobs': independent_jobs,
+                  'suggestion': 'These jobs could potentially run in parallel'
+              })
+          
+          # AWS-specific resource optimization suggestions
+          optimizations['resource_optimization'] = [
+              'Use AWS CLI caching for repeated API calls',
+              'Implement AWS credential caching between steps',
+              'Optimize AWS region selection for performance',
+              'Use AWS CloudFormation for infrastructure provisioning'
+          ]
+          
+          # Security improvements
+          optimizations['security_improvements'] = [
+              'Implement least-privilege IAM policies',
+              'Use AWS Secrets Manager integration with Vault',
+              'Enable AWS CloudTrail for audit logging',
+              'Implement network security groups validation'
+          ]
+          
+          print("☁️ AWS Optimization Analysis:")
+          print(json.dumps(optimizations, indent=2))
+          
+          # Save results
+          with open('aws-optimizations.json', 'w') as f:
+              json.dump(optimizations, f, indent=2)
+          EOF
+
+      - name: Generate AWS optimization recommendations
+        run: |
+          echo "📋 Generating AWS-specific optimization recommendations..."
+          
+          cat > aws-optimization-report.md << 'EOF'
+          # ☁️ AWS-Specific Optimization Report
+          
+          **Generated**: $(date)
+          **Focus**: AWS OpenShift Deployment Optimization
+          **Status**: Active Development Phase
+          
+          ## Current AWS Implementation Status
+          - ✅ Basic AWS deployment workflow implemented
+          - ✅ Vault integration for credential management
+          - ✅ OpenShift 4.18 compatibility
+          - ⚠️ Performance optimization opportunities identified
+          
+          ## Optimization Recommendations
+          
+          ### 🚀 Performance Optimizations
+          1. **Implement Caching Strategy**
+             - Cache OpenShift CLI downloads between runs
+             - Cache Python dependencies and AWS CLI
+             - Use GitHub Actions cache for Ansible collections
+          
+          2. **Parallel Execution**
+             - Run validation steps in parallel where possible
+             - Parallelize AWS resource checks
+             - Implement concurrent subnet tagging
+          
+          3. **AWS-Specific Improvements**
+             - Use AWS CLI pagination for large resource lists
+             - Implement AWS credential caching
+             - Optimize AWS API call patterns
+          
+          ### 🔒 Security Enhancements
+          1. **IAM Optimization**
+             - Implement least-privilege policies
+             - Use temporary credentials with shorter TTL
+             - Add IAM policy validation steps
+          
+          2. **Network Security**
+             - Validate security group configurations
+             - Implement VPC flow log analysis
+             - Add network connectivity pre-checks
+          
+          ### 💰 Cost Optimization
+          1. **Resource Management**
+             - Implement automatic cleanup of failed deployments
+             - Use spot instances for development environments
+             - Monitor and alert on resource usage
+          
+          2. **Deployment Efficiency**
+             - Reduce deployment time to minimize compute costs
+             - Implement smart resource sizing
+             - Use AWS Cost Explorer integration
+          
+          ## Implementation Priority
+          1. **High Priority**: Caching and parallel execution (immediate performance gains)
+          2. **Medium Priority**: Security enhancements (production readiness)
+          3. **Low Priority**: Cost optimization (long-term efficiency)
+          
+          ## Next Steps for AWS Stabilization
+          - [ ] Implement caching for OpenShift CLI and dependencies
+          - [ ] Add parallel validation steps
+          - [ ] Enhance error handling and retry mechanisms
+          - [ ] Create comprehensive monitoring and alerting
+          - [ ] Document AWS-specific troubleshooting procedures
+          
+          ## Multi-Cloud Readiness
+          These AWS optimizations will serve as patterns for:
+          - Azure deployment optimization
+          - GCP deployment optimization  
+          - Cross-cloud performance comparison
+          EOF
+          
+          echo "📊 AWS optimization report generated"
+
+      - name: Upload AWS optimization report
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-optimization-report
+          path: aws-optimization-report.md
+          retention-days: 30
+
+  ai-enhanced-optimization:
+    name: 🤖 AI-Enhanced Optimization Recommendations
+    runs-on: ubuntu-latest
+    needs: [analyze-pipeline-performance, aws-specific-optimization]
+    if: github.event.inputs.ai_enhanced != 'false'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for MCP Server
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: '${{ env.MCP_SERVER_PATH }}/package-lock.json'
+
+      - name: Start MCP Server
+        run: |
+          cd ${{ env.MCP_SERVER_PATH }}
+          npm ci
+          npm run build
+          ./start-server.sh --daemon
+          sleep 5
+
+      - name: Generate AI-powered optimization recommendations
+        env:
+          REDHAT_AI_API_KEY: ${{ secrets.REDHAT_AI_API_KEY }}
+          REDHAT_AI_ENDPOINT: ${{ secrets.REDHAT_AI_ENDPOINT || 'https://granite-8b-code-instruct-maas-apicast-production.apps.prod.rhoai.rh-aiservices-bu.com:443' }}
+          REDHAT_AI_MODEL: ${{ secrets.REDHAT_AI_MODEL || 'granite-8b-code-instruct-128k' }}
+        run: |
+          echo "🤖 Generating AI-enhanced optimization recommendations..."
+
+          if [[ -n "$REDHAT_AI_API_KEY" ]]; then
+            python3 << 'EOF'
+          import json
+          import requests
+          import os
+          import yaml
+
+          # Gather context about the repository
+          context = {
+              'performance_score': '${{ needs.analyze-pipeline-performance.outputs.performance_score }}',
+              'bottlenecks': '${{ needs.analyze-pipeline-performance.outputs.bottlenecks }}',
+              'recommendations': '${{ needs.analyze-pipeline-performance.outputs.recommendations }}',
+              'optimization_focus': '${{ github.event.inputs.optimization_focus }}',
+              'development_phase': 'active_aws_development'
+          }
+
+          # Load current AWS workflow for context
+          try:
+              with open('.github/workflows/deploy-aws.yml', 'r') as f:
+                  aws_workflow = yaml.safe_load(f)
+              context['aws_workflow_jobs'] = list(aws_workflow.get('jobs', {}).keys())
+          except:
+              context['aws_workflow_jobs'] = []
+
+          # Prepare comprehensive prompt for AI
+          prompt = f"""
+          As a Principal Red Hat OpenShift Engineer, analyze this OpenShift multi-cloud automation repository and provide specific, actionable optimization recommendations:
+
+          ## Current Context
+          - **Development Phase**: Active AWS deployment development
+          - **Performance Score**: {context['performance_score']}/100
+          - **Identified Bottlenecks**: {context['bottlenecks']}
+          - **Current Recommendations**: {context['recommendations']}
+          - **Optimization Focus**: {context['optimization_focus']}
+          - **AWS Workflow Jobs**: {', '.join(context['aws_workflow_jobs'])}
+
+          ## Repository Characteristics
+          - OpenShift 4.18 multi-cloud automation (AWS primary, Azure/GCP planned)
+          - HashiCorp Vault for credential management with JWT authentication
+          - GitHub Actions workflows for deployment automation
+          - Active development phase with focus on AWS stabilization
+
+          ## Required Analysis
+          Provide specific recommendations for:
+
+          1. **Immediate AWS Optimizations** (next 2 weeks)
+             - Performance improvements for current AWS workflows
+             - Reliability enhancements for production readiness
+             - Security hardening for Vault and OpenShift integration
+
+          2. **Development Workflow Improvements** (next month)
+             - CI/CD pipeline optimizations for faster development cycles
+             - Testing strategies for multi-cloud validation
+             - Monitoring and observability enhancements
+
+          3. **Multi-Cloud Preparation** (next quarter)
+             - Architectural patterns for Azure/GCP expansion
+             - Code reusability strategies across cloud providers
+             - Unified management and monitoring approaches
+
+          4. **Technical Debt and Maintenance** (ongoing)
+             - Code quality improvements
+             - Documentation and knowledge sharing
+             - Automation of repetitive tasks
+
+          Focus on practical, implementable solutions for a Principal Engineer leading this project.
+          """
+
+          try:
+              response = requests.post(
+                  os.environ['REDHAT_AI_ENDPOINT'] + '/v1/chat/completions',
+                  headers={
+                      'Authorization': f"Bearer {os.environ['REDHAT_AI_API_KEY']}",
+                      'Content-Type': 'application/json'
+                  },
+                  json={
+                      'model': os.environ['REDHAT_AI_MODEL'],
+                      'messages': [
+                          {
+                              'role': 'system',
+                              'content': 'You are a Principal Red Hat OpenShift Engineer with deep expertise in multi-cloud automation, HashiCorp Vault, and GitHub Actions. Provide specific, actionable recommendations based on real-world experience.'
+                          },
+                          {
+                              'role': 'user',
+                              'content': prompt
+                          }
+                      ],
+                      'max_tokens': 2500,
+                      'temperature': 0.2
+                  },
+                  timeout=45
+              )
+
+              if response.status_code == 200:
+                  ai_response = response.json()
+                  recommendations = ai_response['choices'][0]['message']['content']
+
+                  with open('ai-optimization-recommendations.md', 'w') as f:
+                      f.write(f"# 🤖 AI-Enhanced Optimization Recommendations\n\n")
+                      f.write(f"**Generated by Red Hat AI Services (Granite)**\n")
+                      f.write(f"**Date**: {os.popen('date').read().strip()}\n")
+                      f.write(f"**Performance Score**: {context['performance_score']}/100\n")
+                      f.write(f"**Focus Area**: {context['optimization_focus']}\n\n")
+                      f.write(recommendations)
+
+                  print("✅ AI-enhanced recommendations generated successfully")
+              else:
+                  print(f"⚠️ AI service error: {response.status_code}")
+                  print(f"Response: {response.text}")
+
+          except Exception as e:
+              print(f"⚠️ AI generation failed: {e}")
+              # Create fallback recommendations
+              with open('ai-optimization-recommendations.md', 'w') as f:
+                  f.write("# 🤖 Optimization Recommendations (Fallback)\n\n")
+                  f.write("AI service unavailable. Basic recommendations:\n\n")
+                  f.write("1. Focus on AWS deployment stabilization\n")
+                  f.write("2. Implement comprehensive testing\n")
+                  f.write("3. Plan multi-cloud expansion carefully\n")
+          EOF
+          else
+            echo "⚠️ Red Hat AI Services not configured"
+            cat > ai-optimization-recommendations.md << 'EOF'
+          # 🤖 AI-Enhanced Optimization Recommendations
+
+          **Status**: Red Hat AI Services not configured
+          **Recommendation**: Configure REDHAT_AI_API_KEY secret for enhanced analysis
+
+          ## Basic Optimization Recommendations
+
+          ### Immediate Actions (AWS Focus)
+          1. **Stabilize AWS Deployment**
+             - Complete testing of current AWS workflow
+             - Implement comprehensive error handling
+             - Add monitoring and alerting
+
+          2. **Improve Development Workflow**
+             - Add automated testing for workflow changes
+             - Implement staging environment validation
+             - Create rollback procedures
+
+          ### Future Enhancements
+          1. **Multi-Cloud Preparation**
+             - Document AWS lessons learned
+             - Create reusable components for Azure/GCP
+             - Plan unified management approach
+
+          2. **AI Integration**
+             - Configure Red Hat AI Services for enhanced analysis
+             - Implement intelligent failure detection
+             - Add predictive optimization recommendations
+          EOF
+          fi
+
+      - name: Create optimization action plan
+        run: |
+          echo "📋 Creating actionable optimization plan..."
+
+          cat > optimization-action-plan.md << 'EOF'
+          # 🎯 Optimization Action Plan
+
+          **Generated**: $(date)
+          **Performance Score**: ${{ needs.analyze-pipeline-performance.outputs.performance_score }}/100
+          **Priority**: ${{ contains(needs.analyze-pipeline-performance.outputs.bottlenecks, 'low_success_rate') && 'HIGH' || 'MEDIUM' }}
+
+          ## Immediate Actions (This Week)
+
+          ### 🔥 Critical Issues
+          ${{ contains(needs.analyze-pipeline-performance.outputs.bottlenecks, 'low_success_rate') && '- [ ] Address low success rate in AWS deployments' || '' }}
+          ${{ contains(needs.analyze-pipeline-performance.outputs.bottlenecks, 'high_failure_rate') && '- [ ] Investigate and fix high failure rate' || '' }}
+          ${{ contains(needs.analyze-pipeline-performance.outputs.bottlenecks, 'long_duration') && '- [ ] Optimize workflow duration (currently > 30 minutes)' || '' }}
+
+          ### 🚀 Performance Improvements
+          - [ ] Implement caching for OpenShift CLI downloads
+          - [ ] Add parallel execution for independent validation steps
+          - [ ] Optimize AWS API calls and credential management
+          - [ ] Add retry mechanisms for transient failures
+
+          ## Short-term Goals (Next 2 Weeks)
+
+          ### 🔒 Security & Reliability
+          - [ ] Enhance Vault integration error handling
+          - [ ] Implement comprehensive pre-flight checks
+          - [ ] Add deployment health monitoring
+          - [ ] Create automated rollback procedures
+
+          ### 📊 Monitoring & Observability
+          - [ ] Add performance metrics collection
+          - [ ] Implement failure pattern analysis
+          - [ ] Create deployment success dashboards
+          - [ ] Set up alerting for critical failures
+
+          ## Medium-term Objectives (Next Month)
+
+          ### 🌐 Multi-Cloud Preparation
+          - [ ] Document AWS deployment patterns and lessons learned
+          - [ ] Create reusable components for cloud-agnostic operations
+          - [ ] Design Azure deployment workflow based on AWS experience
+          - [ ] Plan GCP integration strategy
+
+          ### 🤖 AI Enhancement
+          - [ ] Configure Red Hat AI Services integration
+          - [ ] Implement intelligent failure analysis
+          - [ ] Add predictive optimization recommendations
+          - [ ] Create AI-powered deployment validation
+
+          ## Success Metrics
+          - **Target Success Rate**: >95% (Current: ~${{ needs.analyze-pipeline-performance.outputs.performance_score }}%)
+          - **Target Duration**: <20 minutes average
+          - **Target Failure Rate**: <5%
+          - **Multi-Cloud Readiness**: Azure workflow ready for testing
+
+          ## Review Schedule
+          - **Weekly**: Performance metrics review
+          - **Bi-weekly**: Action plan progress assessment
+          - **Monthly**: Multi-cloud expansion planning
+          EOF
+
+      - name: Upload optimization artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimization-recommendations
+          path: |
+            ai-optimization-recommendations.md
+            optimization-action-plan.md
+          retention-days: 30
+
+  create-optimization-issue:
+    name: 📝 Create Optimization Tracking Issue
+    runs-on: ubuntu-latest
+    needs: [analyze-pipeline-performance, ai-enhanced-optimization]
+    if: always() && (needs.analyze-pipeline-performance.outputs.performance_score < '80' || github.event.inputs.optimization_focus != 'performance')
+    steps:
+      - name: Create optimization tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const performanceScore = '${{ needs.analyze-pipeline-performance.outputs.performance_score }}';
+            const bottlenecks = '${{ needs.analyze-pipeline-performance.outputs.bottlenecks }}';
+            const focus = '${{ github.event.inputs.optimization_focus }}';
+
+            const title = `🚀 Pipeline Optimization Required - Score: ${performanceScore}/100`;
+
+            const body = `# 🚀 Smart Pipeline Optimization Report
+
+            **Performance Score**: ${performanceScore}/100
+            **Optimization Focus**: ${focus}
+            **Identified Bottlenecks**: ${bottlenecks}
+            **Analysis Date**: ${new Date().toISOString().split('T')[0]}
+
+            ## Current Status
+            - **Development Phase**: Active AWS deployment development
+            - **Primary Cloud**: AWS (Azure/GCP planned)
+            - **AI Enhancement**: ${{ github.event.inputs.ai_enhanced != 'false' ? 'Enabled' : 'Available' }}
+
+            ## Key Findings
+            ${bottlenecks.includes('low_success_rate') ? '- ⚠️ Low success rate detected - requires immediate attention' : ''}
+            ${bottlenecks.includes('long_duration') ? '- ⏱️ Long execution duration - optimization needed' : ''}
+            ${bottlenecks.includes('high_failure_rate') ? '- 🔥 High failure rate - stability improvements required' : ''}
+
+            ## Recommended Actions
+            1. **Review optimization artifacts** from this workflow run
+            2. **Implement high-priority improvements** for AWS deployment
+            3. **Monitor performance metrics** after changes
+            4. **Plan multi-cloud expansion** once AWS is stable
+
+            ## Artifacts Generated
+            - Pipeline Performance Dashboard
+            - AWS-Specific Optimization Report
+            - AI-Enhanced Recommendations (if configured)
+            - Actionable Optimization Plan
+
+            ---
+            *Generated by Smart Pipeline Optimizer*
+            *Workflow Run: ${{ github.run_id }}*`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['optimization', 'pipeline', 'aws', 'ai-assistant']
+            });
+
+  summary:
+    name: 📊 Optimization Summary
+    runs-on: ubuntu-latest
+    needs: [analyze-pipeline-performance, aws-specific-optimization, ai-enhanced-optimization]
+    if: always()
+    steps:
+      - name: Generate optimization summary
+        run: |
+          echo "🎉 Smart Pipeline Optimization Complete!"
+          echo ""
+          echo "📊 Results Summary:"
+          echo "  Performance Score: ${{ needs.analyze-pipeline-performance.outputs.performance_score }}/100"
+          echo "  Bottlenecks: ${{ needs.analyze-pipeline-performance.outputs.bottlenecks }}"
+          echo "  AWS Analysis: ${{ needs.aws-specific-optimization.result }}"
+          echo "  AI Enhancement: ${{ needs.ai-enhanced-optimization.result }}"
+          echo ""
+          echo "🎯 Focus Areas:"
+          echo "  - AWS deployment stabilization (primary)"
+          echo "  - Performance and reliability improvements"
+          echo "  - Multi-cloud expansion preparation"
+          echo "  - AI-enhanced development assistance"
+          echo ""
+          echo "📋 Next Steps:"
+          echo "  1. Review generated optimization reports"
+          echo "  2. Implement high-priority recommendations"
+          echo "  3. Monitor performance improvements"
+          echo "  4. Plan Azure/GCP expansion timeline"

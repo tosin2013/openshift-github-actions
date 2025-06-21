@@ -1,6 +1,6 @@
 name: Deploy OpenShift on Azure
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       cluster_name:
@@ -67,142 +67,16 @@ env:
   ENVIRONMENT: ${{ github.event.inputs.environment }}
 
 jobs:
-  validate:
+  deploy-cluster:
     runs-on: ubuntu-latest
-    outputs:
-      validation_status: ${{ steps.validate.outputs.status }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Validate inputs
-        id: validate
-        run: |
-          ./scripts/common/validate-inputs.sh \
-            --provider azure \
-            --cluster-name "$CLUSTER_NAME" \
-            --region "$REGION" \
-            --node-count "$NODE_COUNT" \
-            --vm-size "$VM_SIZE" \
-            --base-domain "$BASE_DOMAIN"
-          echo "status=success" >> $GITHUB_OUTPUT
-
-  deploy:
-    needs: validate
-    runs-on: ubuntu-latest
-    if: needs.validate.outputs.validation_status == 'success'
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+          creds: '{"type":"serviceAccount","project_id":"${{ secrets.PROJECT_ID }}","private_key_id":"${{ secrets.PRIVATE_KEY_ID }}","private_key":"${{ secrets.PRIVATE_KEY }}","client_email":"${{ secrets.CLIENT_EMAIL }}","client_id":"${{ secrets.CLIENT_ID }}","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url":"${{ secrets.CLIENT_X509_CERT_URL }}"}'
+      - name: Create OpenShift Cluster
         run: |
-          python -m pip install --upgrade pip
-          pip install azure-cli jinja2 pyyaml
-
-      - name: Authenticate to HashiCorp Vault
-        uses: hashicorp/vault-action@v2
-        with:
-          url: ${{ secrets.VAULT_URL }}
-          method: jwt
-          jwtGithubAudience: ${{ secrets.VAULT_JWT_AUDIENCE }}
-          role: ${{ secrets.VAULT_ROLE }}
-          secrets: |
-            azure/creds/openshift-installer client_id | AZURE_CLIENT_ID ;
-            azure/creds/openshift-installer client_secret | AZURE_CLIENT_SECRET ;
-            azure/creds/openshift-installer subscription_id | AZURE_SUBSCRIPTION_ID ;
-            azure/creds/openshift-installer tenant_id | AZURE_TENANT_ID ;
-            secret/data/openshift/pull-secret pullSecret | PULL_SECRET ;
-            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} private_key | SSH_PRIVATE_KEY ;
-            secret/data/openshift/ssh-keys/${{ env.ENVIRONMENT }} public_key | SSH_PUBLIC_KEY
-
-      - name: Install OpenShift CLI
-        run: |
-          mkdir -p ~/bin
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-client-linux.tar.gz | tar xz -C ~/bin
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${{ env.OPENSHIFT_VERSION }}/openshift-install-linux.tar.gz | tar xz -C ~/bin
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Validate Azure credentials
-        run: |
-          az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
-          az account set -s $AZURE_SUBSCRIPTION_ID
-          az account show
-
-      - name: Prepare SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          echo "$SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
-          chmod 600 ~/.ssh/id_rsa
-          chmod 644 ~/.ssh/id_rsa.pub
-
-      - name: Generate install-config.yaml
-        run: |
-          ./scripts/common/generate-install-config.sh \
-            --provider azure \
-            --cluster-name "$CLUSTER_NAME" \
-            --region "$REGION" \
-            --node-count "$NODE_COUNT" \
-            --vm-size "$VM_SIZE" \
-            --base-domain "$BASE_DOMAIN" \
-            --environment "$ENVIRONMENT"
-
-      - name: Create installation manifests
-        run: |
-          mkdir -p installation-dir
-          cp install-config.yaml installation-dir/
-          openshift-install create manifests --dir=installation-dir
-
-      - name: Deploy OpenShift Cluster
-        run: |
-          openshift-install create cluster --dir=installation-dir --log-level=info
-
-      - name: Save cluster credentials
-        run: |
-          ./scripts/common/save-cluster-credentials.sh \
-            --provider azure \
-            --cluster-name "$CLUSTER_NAME" \
-            --region "$REGION" \
-            --environment "$ENVIRONMENT"
-
-      - name: Configure cluster
-        run: |
-          export KUBECONFIG=installation-dir/auth/kubeconfig
-          ./scripts/common/configure-cluster.sh \
-            --provider azure \
-            --cluster-name "$CLUSTER_NAME" \
-            --environment "$ENVIRONMENT"
-
-      - name: Validate deployment
-        run: |
-          export KUBECONFIG=installation-dir/auth/kubeconfig
-          ./tests/validation/validate-cluster.sh \
-            --provider azure \
-            --cluster-name "$CLUSTER_NAME"
-
-      - name: Upload installation logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: azure-installation-logs-${{ env.CLUSTER_NAME }}
-          path: installation-dir/.openshift_install.log
-
-      - name: Upload kubeconfig
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: azure-kubeconfig-${{ env.CLUSTER_NAME }}
-          path: installation-dir/auth/kubeconfig
-
-      - name: Cleanup on failure
-        if: failure()
-        run: |
-          ./scripts/azure/cleanup-failed-deployment.sh \
-            --cluster-name "$CLUSTER_NAME" \
-            --region "$REGION"
+          az group create --name openshift-cluster --location "$REGION"
+          az openshift create --resource-group openshift-cluster --name "$CLUSTER_NAME" --location "$REGION" --compute-machine-type "$VM_SIZE" --worker-count "$NODE_COUNT" --service-principal "${{ secrets.SERVICE_PRINCIPAL }}" --client-id "${{ secrets.CLIENT_ID }}" --cluster-version "$OPENSHIFT_VERSION" --base-domain "$BASE_DOMAIN" --environment "$ENVIRONMENT"

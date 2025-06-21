@@ -1,6 +1,6 @@
 name: Deploy OpenShift Multi-Cloud
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       cloud_provider:

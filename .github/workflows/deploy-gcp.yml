@@ -1,6 +1,6 @@
 name: Deploy OpenShift on GCP
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       cluster_name:

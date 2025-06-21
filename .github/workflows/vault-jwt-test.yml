@@ -1,6 +1,6 @@
 name: Vault JWT vs OC Exec Comparison Test
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       test_method:

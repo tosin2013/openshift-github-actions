@@ -91,17 +91,51 @@ class WorkflowValidator:
             for job_name, job_config in data['jobs'].items():
                 if not isinstance(job_config, dict):
                     continue
-                    
-                if 'runs-on' not in job_config:
+                
+                # Check if this is a reusable workflow job (has 'uses' key)
+                is_reusable_workflow = 'uses' in job_config
+                
+                if not is_reusable_workflow and 'runs-on' not in job_config:
                     self.issues_found.append(f"Job '{job_name}' missing 'runs-on' in {file_path}")
                     valid = False
                 
-                if 'steps' not in job_config:
+                if not is_reusable_workflow and 'steps' not in job_config:
                     self.issues_found.append(f"Job '{job_name}' missing 'steps' in {file_path}")
                     valid = False
         
         return valid
     
+    def clean_ai_response(self, ai_response: str) -> str:
+        """Clean AI response to extract pure YAML content"""
+        if not ai_response:
+            return ""
+        
+        # Remove markdown code blocks
+        lines = ai_response.strip().split('\n')
+        start_idx = 0
+        end_idx = len(lines)
+        
+        # Find start of YAML content (skip code block markers)
+        for i, line in enumerate(lines):
+            if line.strip().startswith('```yaml') or line.strip().startswith('````yaml'):
+                start_idx = i + 1
+                break
+            elif line.strip().startswith('```') or line.strip().startswith('````'):
+                start_idx = i + 1
+                break
+        
+        # Find end of YAML content (skip code block markers)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip().startswith('```') or lines[i].strip().startswith('````'):
+                end_idx = i
+                break
+        
+        # Extract clean YAML content
+        yaml_content = '\n'.join(lines[start_idx:end_idx])
+        
+        # Additional cleanup - remove any leading/trailing whitespace
+        return yaml_content.strip()
+
     def ai_analyze_workflow(self, file_path: str, file_content: str) -> str:
         """Use AI to analyze workflow and suggest fixes"""
         prompt = f"""You are a GitHub Actions workflow expert. Analyze this workflow file and identify issues:
@@ -172,11 +206,15 @@ Return only the corrected YAML:"""
                 
                 fixed_content = self.ai_fix_workflow(content, self.issues_found[-1:])
                 if fixed_content:
-                    backup_path = f"{file_path}.backup"
-                    os.rename(file_path, backup_path)
-                    
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(fixed_content)
+                    # Clean AI response to extract pure YAML
+                    cleaned_content = self.clean_ai_response(fixed_content)
+                    if cleaned_content:
+                        backup_path = f"{file_path}.backup"
+                        if not os.path.exists(backup_path):
+                            os.rename(file_path, backup_path)
+                        
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(cleaned_content)
                     
                     print(f"✅ Fixed workflow saved. Backup: {backup_path}")
                     # Re-validate
@@ -190,12 +228,15 @@ Return only the corrected YAML:"""
             print("🤖 Using AI to fix structural issues...")
             ai_fix = self.ai_fix_workflow(content, self.issues_found[-3:])
             if ai_fix:
-                backup_path = f"{file_path}.backup"
-                if not os.path.exists(backup_path):
-                    os.rename(file_path, backup_path)
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(ai_fix)
+                # Clean AI response to extract pure YAML
+                cleaned_fix = self.clean_ai_response(ai_fix)
+                if cleaned_fix:
+                    backup_path = f"{file_path}.backup"
+                    if not os.path.exists(backup_path):
+                        os.rename(file_path, backup_path)
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(cleaned_fix)
                 
                 print(f"✅ Fixed workflow saved. Backup: {backup_path}")
                 return True
