@@ -129,7 +129,9 @@ jobs:
           echo "🔍 Scanning for exposed secrets in workflows..."
           
           # Check for hardcoded secrets (basic patterns)
-          if grep -r -i "password\|secret\|key\|token" .github/workflows/ --include="*.yml" --include="*.yaml" | grep -v "\${{" | grep -v "#"; then
+          SECRETS_PATTERN='password\|secret\|key\|token'
+          GITHUB_EXPR_PATTERN='secrets\.'
+          if grep -r -i "$SECRETS_PATTERN" .github/workflows/ --include="*.yml" --include="*.yaml" | grep -v "$GITHUB_EXPR_PATTERN" | grep -v "#"; then
             echo "❌ Potential hardcoded secrets found!"
             exit 1
           else
@@ -140,9 +142,11 @@ jobs:
         run: |
           echo "🔍 Checking secret references..."
           
-          # Extract all secret references
-          grep -r "\${{ secrets\." .github/workflows/ --include="*.yml" --include="*.yaml" | \
-            sed 's/.*\${{ secrets\.\([^}]*\) }}.*/\1/' | \
+          # Extract all secret references using a simpler approach
+          find .github/workflows/ -name "*.yml" -o -name "*.yaml" | \
+            xargs grep -h "secrets\." | \
+            grep -o "secrets\.[A-Z_][A-Z0-9_]*" | \
+            sed 's/secrets\.//' | \
             sort -u > /tmp/secrets_used.txt || echo "No secrets found"
           
           if [ -s /tmp/secrets_used.txt ]; then
