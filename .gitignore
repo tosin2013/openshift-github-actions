@@ -35,3 +35,8 @@ Thumbs.db
 # Additional project files
 notes.md
 smart-pipelines.env
+
+# AI Validator sensitive files
+scripts/common/ai-validator.env
+validation-report.json
+*.backup
