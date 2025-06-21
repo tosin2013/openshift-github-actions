@@ -130,12 +130,12 @@ jobs:
 
           # Look for actual hardcoded secrets (values, not references)
           HARDCODED_PATTERNS=(
-            'password\s*[:=]\s*["\'][^"\']{8,}["\']'
-            'token\s*[:=]\s*["\'][^"\']{20,}["\']'
-            'key\s*[:=]\s*["\'][^"\']{20,}["\']'
-            'secret\s*[:=]\s*["\'][^"\']{8,}["\']'
-            'AKIA[0-9A-Z]{16}'  # AWS Access Key pattern
-            '-----BEGIN.*PRIVATE KEY-----'
+            "password\s*[:=]\s*[\"'][^\"']{8,}[\"']"
+            "token\s*[:=]\s*[\"'][^\"']{20,}[\"']"
+            "key\s*[:=]\s*[\"'][^\"']{20,}[\"']"
+            "secret\s*[:=]\s*[\"'][^\"']{8,}[\"']"
+            "AKIA[0-9A-Z]{16}"
+            "-----BEGIN.*PRIVATE KEY-----"
           )
 
           ISSUES_FOUND=false
