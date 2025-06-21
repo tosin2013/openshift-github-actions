@@ -182,7 +182,7 @@ jobs:
               
               const content = fs.readFileSync(file, 'utf8');
               const diff = require('child_process').execSync(
-                `git diff ${{ github.event.pull_request?.base.sha || 'HEAD~1' }} ${{ github.sha }} -- ${file}`,
+                `git diff ${{ github.event.pull_request.base.sha || 'HEAD~1' }} ${{ github.sha }} -- ${file}`,
                 { encoding: 'utf8' }
               ).toString();
               
